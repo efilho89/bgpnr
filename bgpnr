@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+# bgpnr - BGP Network Recon
+# Consulta informações de ASN usando PeeringDB + BGPView APIs
+# Uso: bgpnr [ASN ou nome]   |   bgpnr 15169   |   bgpnr Cloudflare
+# Dependências: python3-requests  (sudo apt install python3-requests)
+# Opcional:     python3-tabulate  (sudo apt install python3-tabulate)
+
+import sys
+import os
+import time
+import requests
+from datetime import datetime
+
+try:
+    from tabulate import tabulate as _tabulate
+    def table(rows, headers=None, fmt="simple"):
+        return _tabulate(rows, headers=headers or [], tablefmt=fmt)
+except ImportError:
+    def table(rows, headers=None, fmt="simple"):
+        """Formatador de tabela simples sem dependências externas."""
+        all_rows = ([headers] + list(rows)) if headers else list(rows)
+        if not all_rows:
+            return ""
+        # Remove códigos ANSI para calcular largura real
+        import re
+        ansi = re.compile(r'\033\[[0-9;]*m')
+        def visual_len(s):
+            return len(ansi.sub("", str(s)))
+        cols = max(len(r) for r in all_rows)
+        widths = [0] * cols
+        for row in all_rows:
+            for i, cell in enumerate(row):
+                for line in str(cell).split("\n"):
+                    widths[i] = max(widths[i], visual_len(line))
+        def pad(cell, width):
+            lines = str(cell).split("\n")
+            return "\n".join(l + " " * (width - visual_len(l)) for l in lines)
+        def fmt_row(row):
+            cells = [pad(row[i] if i < len(row) else "", widths[i]) for i in range(cols)]
+            return "  " + "  ".join(cells)
+        out = []
+        if headers:
+            out.append(fmt_row(headers))
+            out.append("  " + "  ".join("-" * w for w in widths))
+            for row in rows:
+                out.append(fmt_row(row))
+        else:
+            for row in rows:
+                out.append(fmt_row(row))
+        return "\n".join(out)
+
+# ─── Configuração ────────────────────────────────────────────────────────────
+BGPVIEW_API   = "https://api.bgpview.io"
+PEERINGDB_API = "https://www.peeringdb.com/api"
+PEERINGDB_KEY = os.environ.get("PEERINGDB_API_KEY", "")
+MAX_RETRIES   = 5
+RETRY_DELAY   = 2
+REQ_DELAY     = 0.5
+
+# ─── Cores ANSI ──────────────────────────────────────────────────────────────
+class C:
+    RST = "\033[0m"; BOLD = "\033[1m"
+    RED = "\033[91m"; GRN = "\033[92m"; YLW = "\033[93m"
+    BLU = "\033[94m"; MAG = "\033[95m"; CYN = "\033[96m"; GRY = "\033[90m"
+
+def bold(s):   return f"{C.BOLD}{s}{C.RST}"
+def green(s):  return f"{C.GRN}{s}{C.RST}"
+def red(s):    return f"{C.RED}{s}{C.RST}"
+def yellow(s): return f"{C.YLW}{s}{C.RST}"
+def cyan(s):   return f"{C.CYN}{s}{C.RST}"
+def gray(s):   return f"{C.GRY}{s}{C.RST}"
+
+DASH = gray("—")
+
+def section(title):
+    print(f"\n{C.BOLD}{C.CYN}{'─'*70}{C.RST}")
+    print(f"{C.BOLD}{C.CYN}  {title}{C.RST}")
+    print(f"{C.BOLD}{C.CYN}{'─'*70}{C.RST}")
+
+def fmt_date(d):
+    if not d:
+        return DASH
+    try:
+        return datetime.fromisoformat(d.replace("Z", "+00:00")).strftime("%d/%m/%Y")
+    except Exception:
+        return str(d)[:10]
+
+def fmt_speed(mbps):
+    if not mbps:
+        return DASH
+    if mbps >= 1_000_000: return f"{mbps//1_000_000} Tbps"
+    if mbps >= 1_000:     return f"{mbps//1_000} Gbps"
+    return f"{mbps} Mbps"
+
+def yes_no(val):
+    s = str(val).lower()
+    if val is True  or s in ("true","yes","1"):  return green("Sim")
+    if val is False or s in ("false","no","0"): return red("Não")
+    return DASH
+
+def na(val):
+    return DASH if (val is None or val == "" or val == [] or val == 0) else str(val)
+
+# ─── HTTP ─────────────────────────────────────────────────────────────────────
+def get(url, params=None, retries=MAX_RETRIES):
+    headers = {}
+    if PEERINGDB_KEY and "peeringdb" in url:
+        headers["Authorization"] = f"Api-Key {PEERINGDB_KEY}"
+    for attempt in range(retries):
+        try:
+            r = requests.get(url, params=params, headers=headers, timeout=15)
+            if r.status_code == 429:
+                w = RETRY_DELAY * (attempt + 1)
+                print(yellow(f"  Rate limit, aguardando {w}s..."))
+                time.sleep(w); continue
+            if r.status_code == 404:
+                return None
+            r.raise_for_status()
+            return r.json()
+        except requests.exceptions.ConnectionError:
+            print(red(f"  Erro de conexão ({attempt+1}/{retries})"))
+        except requests.exceptions.Timeout:
+            print(red(f"  Timeout ({attempt+1}/{retries})"))
+        except Exception as e:
+            print(red(f"  Erro: {e}"))
+        time.sleep(RETRY_DELAY)
+    return None
+
+# ─── BGPView ──────────────────────────────────────────────────────────────────
+def bv_asn(asn):        return get(f"{BGPVIEW_API}/asn/{asn}")
+def bv_prefixes(asn):   return get(f"{BGPVIEW_API}/asn/{asn}/prefixes")
+def bv_upstreams(asn):  return get(f"{BGPVIEW_API}/asn/{asn}/upstreams")
+def bv_downstreams(asn):return get(f"{BGPVIEW_API}/asn/{asn}/downstreams")
+def bv_search(q):       return get(f"{BGPVIEW_API}/search", params={"query_term": q})
+
+# ─── PeeringDB ────────────────────────────────────────────────────────────────
+def pdb_net(asn):
+    d = get(f"{PEERINGDB_API}/net", params={"asn": asn, "depth": 2})
+    return d["data"][0] if d and d.get("data") else None
+
+def pdb_netixlan(net_id):
+    d = get(f"{PEERINGDB_API}/netixlan", params={"net_id": net_id, "depth": 2})
+    return d.get("data", []) if d else []
+
+def pdb_netfac(net_id):
+    d = get(f"{PEERINGDB_API}/netfac", params={"net_id": net_id, "depth": 2})
+    return d.get("data", []) if d else []
+
+def pdb_search(q):
+    d = get(f"{PEERINGDB_API}/net", params={"name__contains": q, "depth": 1})
+    return d.get("data", []) if d else []
+
+# ─── Seções ───────────────────────────────────────────────────────────────────
+
+def show_header(asn_info, pdb):
+    bv = (asn_info or {}).get("data", {})
+    print()
+    print(f"  {bold(cyan('bgpnr'))} {gray('─')} BGP Network Recon")
+    print()
+
+    name      = bv.get("name") or (pdb.get("name") if pdb else "") or DASH
+    name_long = (pdb.get("name_long", "") if pdb else "")
+    asn_num   = bv.get("asn") or (pdb.get("asn") if pdb else "")
+    country   = bv.get("country_code") or DASH
+    rir_data  = bv.get("rir_allocation", {}) or {}
+    rir       = rir_data.get("rir_name") or (pdb.get("rir_status","") if pdb else "") or DASH
+    alloc     = rir_data.get("date_allocated") or ""
+    website   = bv.get("website") or (pdb.get("website","") if pdb else "") or DASH
+
+    rows = [
+        [bold("ASN"),        f"AS{asn_num}"],
+        [bold("Nome"),       bold(green(name))],
+    ]
+    if name_long and name_long != name:
+        rows.append([bold("Nome completo"), name_long])
+    rows += [
+        [bold("País"),       country],
+        [bold("RIR"),        rir],
+        [bold("Alocado em"), fmt_date(alloc) if alloc else DASH],
+        [bold("Website"),    website],
+    ]
+    if pdb:
+        if pdb.get("aka"):
+            rows.append([bold("Também conhecido"), pdb["aka"]])
+        rows += [
+            [bold("Tipo"),       na(pdb.get("info_type"))],
+            [bold("Escopo"),     na(pdb.get("info_scope"))],
+            [bold("Tráfego"),    na(pdb.get("info_traffic"))],
+            [bold("Ratio"),      na(pdb.get("info_ratio"))],
+            [bold("IPv6"),       yes_no(pdb.get("info_ipv6"))],
+            [bold("Multicast"),  yes_no(pdb.get("info_multicast"))],
+            [bold("IXs"),        na(pdb.get("ix_count"))],
+            [bold("Facilities"), na(pdb.get("fac_count"))],
+        ]
+        if pdb.get("irr_as_set"):
+            rows.append([bold("IRR AS-Set"),    cyan(pdb["irr_as_set"])])
+        if pdb.get("looking_glass"):
+            rows.append([bold("Looking Glass"), pdb["looking_glass"]])
+        if pdb.get("route_server"):
+            rows.append([bold("Route Server"),  pdb["route_server"]])
+
+    print(table(rows))
+
+
+def show_policy(pdb):
+    if not pdb:
+        return
+    fields = {
+        "Política geral":     pdb.get("policy_general",""),
+        "URL da política":    pdb.get("policy_url",""),
+        "Restrição de local": pdb.get("policy_locations",""),
+        "Restrição de ratio": pdb.get("policy_ratio",""),
+        "Contratos":          pdb.get("policy_contracts",""),
+    }
+    never_rs = pdb.get("info_never_via_route_servers", False)
+    if not any(fields.values()) and not never_rs:
+        return
+    section("Política de Peering (PeeringDB)")
+    rows = [[bold(k), yellow(v) if k=="Política geral" else v] for k,v in fields.items() if v]
+    rows.append([bold("Nunca via RS"), yes_no(never_rs)])
+    print(table(rows))
+
+
+def show_contacts(pdb):
+    if not pdb:
+        return
+    pocs = pdb.get("poc_set", [])
+    if not pocs:
+        return
+    section("Contatos (PeeringDB)")
+    rows = [[bold(p.get("role","")), p.get("name","") or DASH,
+             p.get("email","") or DASH, p.get("phone","") or DASH] for p in pocs]
+    print(table(rows, headers=[bold("Papel"), bold("Nome"), bold("E-mail"), bold("Telefone")]))
+
+
+def show_prefixes(asn):
+    section("Prefixos Anunciados (BGPView)")
+    data = bv_prefixes(asn); time.sleep(REQ_DELAY)
+    if not data or not data.get("data"):
+        print(red("  Sem dados de prefixos.")); return
+
+    v4 = data["data"].get("ipv4_prefixes", [])
+    v6 = data["data"].get("ipv6_prefixes", [])
+
+    if v4:
+        rows = []
+        for p in v4:
+            rir = (p.get("rir_allocation") or {}).get("rir_name", "")
+            rows.append([cyan(p.get("prefix","")),
+                         (p.get("name") or p.get("description","") or DASH)[:50],
+                         gray(rir)])
+        print(bold(f"\n  IPv4 — {len(v4)} prefixo(s)"))
+        print(table(rows, headers=[bold("Prefixo"), bold("Descrição"), bold("RIR")]))
+    if v6:
+        rows = []
+        for p in v6:
+            rir = (p.get("rir_allocation") or {}).get("rir_name", "")
+            rows.append([cyan(p.get("prefix","")),
+                         (p.get("name") or p.get("description","") or DASH)[:50],
+                         gray(rir)])
+        print(bold(f"\n  IPv6 — {len(v6)} prefixo(s)"))
+        print(table(rows, headers=[bold("Prefixo"), bold("Descrição"), bold("RIR")]))
+    if not v4 and not v6:
+        print(gray("  Nenhum prefixo encontrado."))
+
+
+def _peer_table(data, key4, key6):
+    seen = {}
+    for k in (key4, key6):
+        for p in data.get(k, []):
+            a = p.get("asn")
+            if a not in seen:
+                seen[a] = {"name": p.get("name",""), "desc": p.get("description",""), "v4":False, "v6":False}
+            seen[a]["v4" if k==key4 else "v6"] = True
+    rows = []
+    for a, d in sorted(seen.items()):
+        rows.append([f"AS{a}", bold(d["name"][:40]), d["desc"][:30],
+                     green("✔") if d["v4"] else gray("✘"),
+                     green("✔") if d["v6"] else gray("✘")])
+    return rows
+
+
+def show_upstreams(asn):
+    section("Upstream Providers (BGPView)")
+    data = bv_upstreams(asn); time.sleep(REQ_DELAY)
+    if not data or not data.get("data"):
+        print(red("  Sem dados de upstreams.")); return
+    rows = _peer_table(data["data"], "ipv4_upstreams", "ipv6_upstreams")
+    if not rows: print(gray("  Nenhum upstream encontrado.")); return
+    print(table(rows, headers=[bold("ASN"), bold("Nome"), bold("Descrição"), bold("IPv4"), bold("IPv6")]))
+
+
+def show_downstreams(asn):
+    section("Downstream Customers (BGPView)")
+    data = bv_downstreams(asn); time.sleep(REQ_DELAY)
+    if not data or not data.get("data"):
+        print(red("  Sem dados de downstreams.")); return
+    rows = _peer_table(data["data"], "ipv4_downstreams", "ipv6_downstreams")
+    if not rows: print(gray("  Nenhum downstream encontrado.")); return
+    print(table(rows, headers=[bold("ASN"), bold("Nome"), bold("Descrição"), bold("IPv4"), bold("IPv6")]))
+
+
+def show_ixs(pdb, net_id):
+    section("Internet Exchanges (PeeringDB)")
+    if not pdb or not net_id:
+        print(gray("  ASN não encontrado no PeeringDB.")); return
+
+    ixlans = pdb.get("netixlan_set", []) or pdb_netixlan(net_id)
+    if not ixlans:
+        print(gray("  Nenhum IX encontrado.")); return
+
+    ix_map = {}
+    for e in ixlans:
+        ix_id = e.get("ix_id") or e.get("ixlan_id")
+        if ix_id not in ix_map:
+            ix_map[ix_id] = {
+                "name": e.get("name","") or f"IX-{ix_id}",
+                "speed": e.get("speed",0), "ipv4":[], "ipv6":[],
+                "rs": e.get("is_rs_peer",False),
+                "bfd": e.get("bfd_support",False),
+                "op": e.get("operational",True),
+            }
+        if e.get("ipaddr4"): ix_map[ix_id]["ipv4"].append(e["ipaddr4"])
+        if e.get("ipaddr6"): ix_map[ix_id]["ipv6"].append(e["ipaddr6"])
+        if e.get("speed",0) > ix_map[ix_id]["speed"]: ix_map[ix_id]["speed"] = e["speed"]
+
+    rows = []
+    for d in sorted(ix_map.values(), key=lambda x: x["name"]):
+        op  = green("●") if d["op"]  else red("●")
+        rs  = green("RS")  if d["rs"]  else gray("—")
+        bfd = green("BFD") if d["bfd"] else gray("—")
+        rows.append([
+            f"{op} {bold(d['name'][:40])}",
+            cyan(fmt_speed(d["speed"])),
+            "\n".join(d["ipv4"]) or DASH,
+            "\n".join(d["ipv6"]) or DASH,
+            rs, bfd,
+        ])
+    print(table(rows, headers=[bold("Internet Exchange"), bold("Velocidade"),
+                                bold("IPv4"), bold("IPv6"), bold("RS"), bold("BFD")]))
+    print(gray(f"\n  Total: {len(ix_map)} IX(s)"))
+
+
+def show_facilities(pdb, net_id):
+    section("Facilities / Colocation (PeeringDB)")
+    if not pdb or not net_id:
+        print(gray("  ASN não encontrado no PeeringDB.")); return
+
+    facs = pdb.get("netfac_set", []) or pdb_netfac(net_id)
+    if not facs:
+        print(gray("  Nenhuma facility encontrada.")); return
+
+    rows = []
+    for f in sorted(facs, key=lambda x: x.get("name","") or ""):
+        name = f.get("name","") or f"FAC-{f.get('fac_id','')}"
+        city = f.get("city",""); country = f.get("country","")
+        loc  = ", ".join(filter(None,[city,country])) or DASH
+        rows.append([bold(name[:50]), loc])
+    print(table(rows, headers=[bold("Facility"), bold("Localização")]))
+    print(gray(f"\n  Total: {len(facs)} facility(ies)"))
+
+
+# ─── Busca por nome ───────────────────────────────────────────────────────────
+
+def search_and_select(query):
+    print(f"\n  Buscando por {bold(yellow(query))} ...\n")
+    results = []
+
+    bv = bv_search(query); time.sleep(REQ_DELAY)
+    if bv and bv.get("data"):
+        for item in bv["data"].get("asns", []):
+            if item.get("asn"):
+                results.append({"asn": item["asn"], "name": item.get("name",""),
+                                 "desc": item.get("description",""),
+                                 "country": item.get("country_code",""), "src":"BGPView"})
+
+    pdb = pdb_search(query); time.sleep(REQ_DELAY)
+    if pdb:
+        existing = {r["asn"] for r in results}
+        for item in pdb:
+            if item.get("asn") and item["asn"] not in existing:
+                results.append({"asn": item["asn"], "name": item.get("name",""),
+                                 "desc": item.get("aka",""), "country":"", "src":"PeeringDB"})
+
+    if not results:
+        print(red("  Nenhum resultado encontrado.")); sys.exit(1)
+
+    rows = [[i+1, f"AS{r['asn']}", bold(r['name'][:42]), r['desc'][:30],
+             gray(r['country']), gray(r['src'])] for i,r in enumerate(results)]
+    print(table(rows, headers=[bold("#"), bold("ASN"), bold("Nome"),
+                                bold("Descrição"), bold("País"), bold("Fonte")]))
+    print()
+    try:
+        choice = input(f"  {bold('Selecione o número')} (Enter para cancelar): ").strip()
+        if not choice: sys.exit(0)
+        idx = int(choice) - 1
+        if 0 <= idx < len(results): return results[idx]["asn"]
+        print(red("  Opção inválida.")); sys.exit(1)
+    except (ValueError, KeyboardInterrupt):
+        print(); sys.exit(0)
+
+
+# ─── Main ─────────────────────────────────────────────────────────────────────
+
+def run(asn_or_name):
+    clean = asn_or_name.strip().upper().lstrip("AS")
+    asn   = int(clean) if clean.isdigit() else search_and_select(asn_or_name.strip())
+
+    if not asn:
+        print(red("  ASN inválido.")); sys.exit(1)
+
+    print(f"\n  Consultando {bold(cyan(f'AS{asn}'))} ...\n")
+
+    asn_info = bv_asn(asn);  time.sleep(REQ_DELAY)
+    pdb_info = pdb_net(asn); time.sleep(REQ_DELAY)
+    net_id   = pdb_info.get("id") if pdb_info else None
+
+    show_header(asn_info, pdb_info)
+    show_policy(pdb_info)
+    show_contacts(pdb_info)
+    show_prefixes(asn)
+    show_upstreams(asn)
+    show_downstreams(asn)
+    show_ixs(pdb_info, net_id)
+    show_facilities(pdb_info, net_id)
+
+    print()
+    print(gray("  Fontes: BGPView (api.bgpview.io) + PeeringDB (peeringdb.com)"))
+    if PEERINGDB_KEY:
+        print(gray("  PeeringDB: autenticado com API Key"))
+    else:
+        print(gray("  Dica: export PEERINGDB_API_KEY=<chave>  para acesso autenticado"))
+    print()
+
+
+def interactive():
+    print(f"""
+  {bold(cyan('bgpnr'))} {gray('─')} BGP Network Recon
+  {gray('Consulta ASN via PeeringDB + BGPView')}
+
+  {bold('ASN')}  →  ex: 1916, 15169, AS6939
+  {bold('Nome')} →  ex: Cloudflare, ANSP, Embratel, NTT
+  {gray('Ctrl+C para sair')}
+""")
+    try:
+        query = input(f"  {bold('ASN / Organização')}: ").strip()
+    except KeyboardInterrupt:
+        print(); sys.exit(0)
+    if not query: sys.exit(0)
+    run(query)
+
+
+if __name__ == "__main__":
+    try:
+        if len(sys.argv) > 1:
+            run(" ".join(sys.argv[1:]))
+        else:
+            interactive()
+    except KeyboardInterrupt:
+        print(f"\n{gray('  Interrompido.')}\n"); sys.exit(0)
