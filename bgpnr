@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# bgpnr v2.0 - BGP Network Recon
-# Fontes: PeeringDB + RIPE Stat API (substituiu BGPView que saiu do ar)
+# bgpnr v2.1 - BGP Network Recon
+# Fontes: PeeringDB + RIPE Stat API
 # Uso:
 #   bgpnr 13335                   → consulta ASN
 #   bgpnr Cloudflare              → busca por nome
 #   bgpnr --compare 262979 15169  → IXs em comum entre dois ASNs
+#   bgpnr --transit 262979        → trânsito IP vs IXs (oportunidades de peering)
 
 import sys, os, time, requests
 from datetime import datetime
@@ -144,7 +145,7 @@ def pdb_search(query):
 def show_header(asn, pdb, ripe_ov):
     rov = (ripe_ov or {}).get("data", {})
     print()
-    print(f"  {bold(cyan('bgpnr'))} {gray('─')} BGP Network Recon v2.0")
+    print(f"  {bold(cyan('bgpnr'))} {gray('─')} BGP Network Recon v2.1")
     print()
 
     name      = (pdb.get("name") if pdb else "") or rov.get("holder","") or DASH
@@ -311,6 +312,133 @@ def show_facilities(pdb, net_id):
     print(gray(f"\n  Total: {len(facs)} facility(ies)"))
 
 
+# ── Trânsito IP vs IXs ───────────────────────────────────────────────────────
+
+def transit_vs_ix(asn):
+    """
+    Mostra os provedores de trânsito (upstreams) do ASN e verifica
+    quais deles também estão presentes nos mesmos IXs — oportunidade
+    de peering direto para substituir ou complementar o trânsito.
+    """
+    print(f"\n  Analisando trânsito IP e IXs de {bold(cyan(f'AS{asn}'))} ...\n")
+
+    # 1. Upstreams via RIPE Stat
+    nb_data = ripe_neighbours(asn); time.sleep(REQ_DELAY)
+    if not nb_data or not nb_data.get("data"):
+        print(red("  Sem dados de neighbours no RIPE Stat.")); return
+
+    ups = [n for n in nb_data["data"].get("neighbours",[]) if n.get("type") == "left"]
+    if not ups:
+        print(gray("  Nenhum upstream encontrado no RIPE Stat.")); return
+
+    upstream_asns = [n["asn"] for n in ups]
+
+    # 2. IXs do ASN principal via PeeringDB
+    pdb_main = pdb_net(asn); time.sleep(REQ_DELAY)
+    if not pdb_main:
+        print(red("  ASN não encontrado no PeeringDB.")); return
+
+    ixlans_main = pdb_main.get("netixlan_set") or pdb_netixlan(pdb_main["id"]); time.sleep(REQ_DELAY)
+    if not ixlans_main:
+        print(gray("  ASN não presente em nenhum IX no PeeringDB.")); return
+
+    name_main = pdb_main.get("name","") or f"AS{asn}"
+
+    # Mapeia ix_id → dados do ASN principal
+    def build_map(ixlans):
+        m = {}
+        for e in ixlans:
+            ix_id = e.get("ix_id") or e.get("ixlan_id")
+            if ix_id not in m:
+                m[ix_id] = {"name": e.get("name","") or f"IX-{ix_id}",
+                             "speed":0, "ipv4":[], "ipv6":[], "rs":e.get("is_rs_peer",False)}
+            if e.get("ipaddr4"): m[ix_id]["ipv4"].append(e["ipaddr4"])
+            if e.get("ipaddr6"): m[ix_id]["ipv6"].append(e["ipaddr6"])
+            if e.get("speed",0) > m[ix_id]["speed"]: m[ix_id]["speed"] = e["speed"]
+        return m
+
+    map_main = build_map(ixlans_main)
+
+    print(f"  {bold(green(name_main))} presente em {bold(str(len(map_main)))} IX(s)")
+    print(f"  Verificando {bold(str(len(upstream_asns)))} upstream(s) no PeeringDB ...\n")
+
+    results_common = []   # upstreams que compartilham IX
+    results_none   = []   # upstreams sem IX em comum
+    results_nopdb  = []   # upstreams não encontrados no PeeringDB
+
+    for up_asn in sorted(upstream_asns):
+        pdb_up = pdb_net(up_asn); time.sleep(REQ_DELAY)
+        if not pdb_up:
+            results_nopdb.append(up_asn); continue
+
+        up_name = pdb_up.get("name","") or f"AS{up_asn}"
+        ixlans_up = pdb_up.get("netixlan_set") or pdb_netixlan(pdb_up["id"]); time.sleep(REQ_DELAY)
+        if not ixlans_up:
+            results_none.append({"asn": up_asn, "name": up_name, "reason": "Não presente em IXs"}); continue
+
+        map_up = build_map(ixlans_up)
+        common = set(map_main.keys()) & set(map_up.keys())
+
+        if not common:
+            results_none.append({"asn": up_asn, "name": up_name,
+                                  "reason": f"Em {len(map_up)} IX(s), nenhum em comum"}); continue
+
+        results_common.append({
+            "asn": up_asn, "name": up_name,
+            "common": common, "map_up": map_up,
+        })
+
+    # ── Resultado: upstreams com IX em comum ──────────────────────────────────
+    if results_common:
+        section(f"Oportunidades de Peering Direto — {len(results_common)} upstream(s) no mesmo IX")
+        print(gray("  Estes provedores de trânsito estão presentes nos mesmos IXs que você.\n"
+                   "  Considere negociar peering gratuito (settlement-free) com eles.\n"))
+
+        for r in results_common:
+            up_asn, up_name = r["asn"], r["name"]
+            n_common = len(r["common"])
+            print(f"  {bold(green(f'AS{up_asn}'))}  {bold(up_name)}  {gray(f'— {n_common} IX(s) em comum')}")
+
+            rows = []
+            for ix_id in sorted(r["common"], key=lambda x: map_main[x]["name"]):
+                d_me = map_main[ix_id]
+                d_up = r["map_up"][ix_id]
+                rs_me = green("RS") if d_me["rs"] else gray("—")
+                rs_up = green("RS") if d_up["rs"] else gray("—")
+                rows.append([
+                    bold(d_me["name"][:35]),
+                    cyan(fmt_speed(d_me["speed"])), cyan(fmt_speed(d_up["speed"])),
+                    "\n".join(d_me["ipv4"]) or DASH, "\n".join(d_up["ipv4"]) or DASH,
+                    "\n".join(d_me["ipv6"]) or DASH, "\n".join(d_up["ipv6"]) or DASH,
+                    rs_me, rs_up,
+                ])
+            print(table(rows, headers=[
+                bold("IX"),
+                bold(f"Vel AS{asn}"), bold(f"Vel AS{up_asn}"),
+                bold(f"IPv4 AS{asn}"), bold(f"IPv4 AS{up_asn}"),
+                bold(f"IPv6 AS{asn}"), bold(f"IPv6 AS{up_asn}"),
+                bold("RS meu"), bold("RS trânsito"),
+            ]))
+            print()
+
+    # ── Upstreams sem IX em comum ─────────────────────────────────────────────
+    if results_none:
+        section(f"Upstreams sem IX em Comum — {len(results_none)}")
+        rows = [[f"AS{r['asn']}", bold(r['name'][:42]), gray(r['reason'])]
+                for r in results_none]
+        print(table(rows, headers=[bold("ASN"), bold("Nome"), bold("Situação")]))
+
+    # ── Upstreams não no PeeringDB ────────────────────────────────────────────
+    if results_nopdb:
+        section(f"Upstreams não encontrados no PeeringDB — {len(results_nopdb)}")
+        rows = [[f"AS{a}"] for a in results_nopdb]
+        print(table(rows, headers=[bold("ASN")]))
+
+    print()
+    print(gray("  Fontes: RIPE Stat (neighbours) + PeeringDB (IXs)"))
+    print()
+
+
 # ── Comparação de IXs entre dois ASNs ────────────────────────────────────────
 
 def compare_ixs(asn1, asn2):
@@ -453,12 +581,13 @@ def run(asn_or_name):
 
 def interactive():
     print(f"""
-  {bold(cyan('bgpnr'))} {gray('─')} BGP Network Recon v2.0
+  {bold(cyan('bgpnr'))} {gray('─')} BGP Network Recon v2.1
   {gray('Fontes: RIPE Stat + PeeringDB')}
 
   {bold('bgpnr 13335')}               → consulta ASN
   {bold('bgpnr Cloudflare')}          → busca por nome
   {bold('bgpnr --compare 1234 5678')} → IXs em comum entre dois ASNs
+  {bold('bgpnr --transit 1234')}      → trânsito IP vs IXs (oportunidades de peering)
   {gray('Ctrl+C para sair')}
 """)
     try:
@@ -476,11 +605,15 @@ if __name__ == "__main__":
             interactive()
         elif args[0] in ("-h","--help"):
             print(f"\n  bgpnr <ASN|nome>                  consulta ASN")
-            print(f"  bgpnr --compare <ASN1> <ASN2>     IXs em comum\n")
+            print(f"  bgpnr --compare <ASN1> <ASN2>     IXs em comum entre dois ASNs")
+            print(f"  bgpnr --transit <ASN>             trânsito IP vs IXs (peering opportunities)\n")
         elif args[0] in ("--compare","-c","compare") and len(args) >= 3:
             a1 = int(str(args[1]).upper().lstrip("AS"))
             a2 = int(str(args[2]).upper().lstrip("AS"))
             compare_ixs(a1, a2)
+        elif args[0] in ("--transit","-t","transit") and len(args) >= 2:
+            a1 = int(str(args[1]).upper().lstrip("AS"))
+            transit_vs_ix(a1)
         else:
             run(" ".join(args))
     except KeyboardInterrupt:
