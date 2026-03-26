@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bgpnr v5.1 - BGP Network Recon  |  github.com/efilho89/bgpnr
+# bgpnr v5.3 - Solução Next-Route BGP  |  github.com/efilho89/bgpnr
 
 import sys, os, time, re, requests
 from datetime import datetime
@@ -9,9 +9,9 @@ from concurrent.futures import ThreadPoolExecutor
 RIPE_API      = "https://stat.ripe.net/data"
 PEERINGDB_API = "https://www.peeringdb.com/api"
 PEERINGDB_KEY = os.environ.get("PEERINGDB_API_KEY", "")
-UA            = "bgpnr/4.0 (github.com/efilho89/bgpnr)"
-MAX_RETRIES   = 3
-RETRY_DELAY   = 2
+UA            = "bgpnr/5.3 (github.com/efilho89/bgpnr)"
+MAX_RETRIES   = 2
+RETRY_DELAY   = 1
 REQ_DELAY     = 0.1
 
 # ── Cores ─────────────────────────────────────────────────────────────────────
@@ -139,7 +139,7 @@ def get(url, params=None, retries=MAX_RETRIES):
         headers["Authorization"] = f"Api-Key {PEERINGDB_KEY}"
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=15)
+            r = requests.get(url, params=params, headers=headers, timeout=8)
             if r.status_code == 429:
                 w = RETRY_DELAY*(attempt+1)
                 print(yellow(f"  ⏳ Rate limit {w}s...")); time.sleep(w); continue
@@ -218,10 +218,13 @@ def banner():
     for line in LOGO.split("\n"):
         print(f"  {C.BOLD}{C.CYN}{line}{C.RST}")
     # rodapé do banner
-    info = "BGP Network Recon  v4.0  |  RIPE Stat  +  PeeringDB"
-    pad  = (74 - len(info)) // 2
+    line1 = "Solução Next-Route BGP"
+    line2 = "v5.3  |  RIPE Stat  +  PeeringDB  |  github.com/efilho89/bgpnr"
+    p1 = (76 - len(line1)) // 2
+    p2 = (76 - len(line2)) // 2
     print(f"  {C.GRY}{'─'*76}{C.RST}")
-    print(f"  {C.GRY}{' '*pad}{info}{C.RST}")
+    print(f"  {C.BOLD}{C.CYN}{' '*p1}{line1}{C.RST}")
+    print(f"  {C.GRY}{' '*p2}{line2}{C.RST}")
     print(f"  {C.GRY}{'─'*76}{C.RST}")
     print()
 
@@ -233,7 +236,13 @@ def show_header(asn, pdb, ripe_ov):
     name_long = (pdb.get("name_long","") if pdb else "")
     country   = ((pdb.get("org") or {}).get("country","") if pdb else "") or ""
     website   = (pdb.get("website","") if pdb else "") or ""
-    rir       = (pdb.get("rir_status","") if pdb else "") or ""
+    # RIR: extrai do bloco RIPE Stat (ex: "LACNIC"), evita mostrar "ok"
+    _blk  = ((ripe_ov or {}).get("data",{}) or {}).get("block",{}) or {}
+    _bdsc = (_blk.get("desc","") or _blk.get("name","") or "").upper()
+    rir   = next((r for r in ("LACNIC","ARIN","RIPE","APNIC","AFRINIC") if r in _bdsc), "")
+    if not rir:
+        _rs = (pdb.get("rir_status","") if pdb else "") or ""
+        rir = _rs if _rs not in ("ok","") else ""
 
     section(f"AS{asn}  —  {ANSI.sub('',name)}", "◈", C.CYN)
     print()
@@ -484,11 +493,22 @@ def show_neighbours(asn, _data=None):
     dns   = sorted([n for n in nb if n.get("type")=="right"],     key=lambda x: -x.get("power",0))
     peers = sorted([n for n in nb if n.get("type")=="uncertain"], key=lambda x:  x.get("asn",0))
 
-    DETAIL = 12  # top N com nome completo
+    DETAIL = 10  # top N com nome completo
 
-    def fetch_holder(asn_n):
-        d = get(f"{RIPE_API}/as-overview/data.json", {"resource": f"AS{asn_n}"})
-        return ((d or {}).get("data",{}) or {}).get("holder","") or ""
+    def fetch_holder_fast(asn_n):
+        """Lookup leve com timeout curto — não bloqueia se API lenta."""
+        try:
+            r = requests.get(
+                f"{RIPE_API}/as-overview/data.json",
+                params={"resource": f"AS{asn_n}"},
+                headers={"User-Agent": UA},
+                timeout=5
+            )
+            if r.status_code == 200:
+                return r.json().get("data",{}).get("holder","") or ""
+        except Exception:
+            pass
+        return ""
 
     def compact_grid(items, color_fn, ncols=5):
         w = 14; bar = f"{C.GRY}│{C.RST}"
@@ -500,23 +520,25 @@ def show_neighbours(asn, _data=None):
             print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
         print(f"  {C.GRY}└{'┴'.join('─'*(w+2) for _ in range(ncols))}┘{C.RST}")
 
-    def show_group(items, label, icon, col, asn_fn):
-        if not items: return
-        section(f"{label}  ({len(items)})", icon, col)
-        print()
-        top  = items[:DETAIL]
-        rest = items[DETAIL:]
-
-        # Busca nomes em paralelo para o top N
-        sys.stdout.write(f"  {gray('Buscando nomes...')}\r")
-        sys.stdout.flush()
-        with ThreadPoolExecutor(max_workers=DETAIL) as ex:
-            futs = {n["asn"]: ex.submit(fetch_holder, n["asn"]) for n in top}
+    # ── Busca nomes de ups+dns em UM único lote paralelo ──────────────────────
+    top_ups = ups[:DETAIL]
+    top_dns = dns[:DETAIL]
+    all_asns = list({n["asn"] for n in top_ups + top_dns})
+    names: dict = {}
+    if all_asns:
+        sys.stdout.write(f"  {gray('Buscando nomes...')}\r"); sys.stdout.flush()
+        with ThreadPoolExecutor(max_workers=min(len(all_asns), 20)) as ex:
+            futs = {a: ex.submit(fetch_holder_fast, a) for a in all_asns}
             names = {a: f.result() for a, f in futs.items()}
         sys.stdout.write(" " * 30 + "\r")
 
+    def show_group(items, top_items, label, icon, col, asn_fn):
+        if not items: return
+        section(f"{label}  ({len(items)})", icon, col)
+        print()
+        rest = items[DETAIL:]
         rows = []
-        for n in top:
+        for n in top_items:
             nm = names.get(n["asn"],"") or f"AS{n['asn']}"
             v4 = green("✔") if n.get("v4_peers",0) > 0 else red("✘")
             v6 = green("✔") if n.get("v6_peers",0) > 0 else red("✘")
@@ -524,14 +546,13 @@ def show_neighbours(asn, _data=None):
         print(vtable(rows,
             headers=[gray("ASN"), gray("Nome / Holder"), gray("IPv4"), gray("IPv6")],
             color=col, hcolor=col))
-
         if rest:
             print(f"\n  {gray(f'  +{len(rest)} adicionais:')}")
             compact_grid(rest, lambda s: gray(s))
         print()
 
-    show_group(ups,  "Upstream Providers",   "▲", C.BLU, lambda s: bold(blue(s)))
-    show_group(dns,  "Downstream Customers", "▼", C.GRN, lambda s: bold(green(s)))
+    show_group(ups, top_ups, "Upstream Providers",   "▲", C.BLU, lambda s: bold(blue(s)))
+    show_group(dns, top_dns, "Downstream Customers", "▼", C.GRN, lambda s: bold(green(s)))
 
     if peers:
         shown = peers[:60]
