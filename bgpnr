@@ -1,41 +1,27 @@
 #!/usr/bin/env python3
-# bgpnr v3.0 - BGP Network Recon
-# Fontes: PeeringDB + RIPE Stat API
-# Uso:
-#   bgpnr 13335                   → consulta ASN
-#   bgpnr Cloudflare              → busca por nome
-#   bgpnr --compare 262979 15169  → IXs em comum entre dois ASNs
-#   bgpnr --transit 262979        → trânsito IP vs IXs (oportunidades de peering)
+# bgpnr v4.0 - BGP Network Recon  |  github.com/efilho89/bgpnr
 
 import sys, os, time, re, requests
 from datetime import datetime
-
-try:
-    from tabulate import tabulate as _tab
-    HAS_TAB = True
-except ImportError:
-    HAS_TAB = False
 
 # ── Config ────────────────────────────────────────────────────────────────────
 RIPE_API      = "https://stat.ripe.net/data"
 PEERINGDB_API = "https://www.peeringdb.com/api"
 PEERINGDB_KEY = os.environ.get("PEERINGDB_API_KEY", "")
-UA            = "bgpnr/3.0 (github.com/efilho89/bgpnr)"
+UA            = "bgpnr/4.0 (github.com/efilho89/bgpnr)"
 MAX_RETRIES   = 4
 RETRY_DELAY   = 2
 REQ_DELAY     = 0.4
-WIDTH         = 78
 
 # ── Cores ─────────────────────────────────────────────────────────────────────
 class C:
-    RST  = "\033[0m";  BOLD = "\033[1m"
-    RED  = "\033[91m"; GRN  = "\033[92m"; YLW = "\033[93m"
-    BLU  = "\033[94m"; MAG  = "\033[95m"; CYN = "\033[96m"
-    GRY  = "\033[90m"; WHT  = "\033[97m"
-    BGRD = "\033[41m"; BGGN = "\033[42m"
+    RST = "\033[0m";  BOLD = "\033[1m";  DIM = "\033[2m"
+    RED = "\033[91m"; GRN  = "\033[92m"; YLW = "\033[93m"
+    BLU = "\033[94m"; MAG  = "\033[95m"; CYN = "\033[96m"
+    GRY = "\033[90m"; WHT  = "\033[97m"
 
-ANSI_RE = re.compile(r'\033\[[0-9;]*m')
-def vlen(s):    return len(ANSI_RE.sub("", str(s)))
+ANSI = re.compile(r'\033\[[0-9;]*m')
+def vlen(s):    return len(ANSI.sub("", str(s)))
 def bold(s):    return f"{C.BOLD}{s}{C.RST}"
 def green(s):   return f"{C.GRN}{s}{C.RST}"
 def red(s):     return f"{C.RED}{s}{C.RST}"
@@ -45,87 +31,105 @@ def magenta(s): return f"{C.MAG}{s}{C.RST}"
 def gray(s):    return f"{C.GRY}{s}{C.RST}"
 def blue(s):    return f"{C.BLU}{s}{C.RST}"
 def white(s):   return f"{C.WHT}{s}{C.RST}"
+def dim(s):     return f"{C.DIM}{s}{C.RST}"
 DASH = gray("—")
 
-# ── Tabela ────────────────────────────────────────────────────────────────────
-def table(rows, headers=None, pad=2):
-    """Tabela simples sem dependências externas."""
-    if HAS_TAB:
-        return _tab(rows, headers=headers or [], tablefmt="simple")
-    all_rows = ([headers] + list(rows)) if headers else list(rows)
-    if not all_rows: return ""
-    cols = max(len(r) for r in all_rows)
+# ── Box Drawing ───────────────────────────────────────────────────────────────
+# Estilos de box: duplo (═║╔╗╚╝╠╣╦╩╬) e simples (─│┌┐└┘├┤┬┴┼)
+
+def box_top(widths, style="single", color=C.CYN):
+    if style == "double":
+        s = "╔" + "╦".join("═"*(w+2) for w in widths) + "╗"
+    else:
+        s = "┌" + "┬".join("─"*(w+2) for w in widths) + "┐"
+    return f"{color}{C.BOLD}{s}{C.RST}"
+
+def box_mid(widths, style="single", color=C.CYN):
+    if style == "double":
+        s = "╠" + "╬".join("═"*(w+2) for w in widths) + "╣"
+    else:
+        s = "├" + "┼".join("─"*(w+2) for w in widths) + "┤"
+    return f"{color}{s}{C.RST}"
+
+def box_sep(widths, style="single", color=C.GRY):
+    s = "├" + "┼".join("─"*(w+2) for w in widths) + "┤"
+    return f"{color}{s}{C.RST}"
+
+def box_bot(widths, style="single", color=C.CYN):
+    if style == "double":
+        s = "╚" + "╩".join("═"*(w+2) for w in widths) + "╝"
+    else:
+        s = "└" + "┴".join("─"*(w+2) for w in widths) + "┘"
+    return f"{color}{s}{C.RST}"
+
+def box_row(cells, widths, vc=C.GRY, cc="│"):
+    parts = []
+    for i, cell in enumerate(cells):
+        w   = widths[i]
+        pad = " " * (w - vlen(str(cell)))
+        parts.append(f" {cell}{pad} ")
+    bar = f"{vc}{cc}{C.RST}"
+    return bar + bar.join(parts) + bar
+
+def vtable(rows, headers=None, color=C.CYN, hcolor=C.CYN, sep_every=0):
+    """Tabela com bordas verticais e horizontais usando box-drawing."""
+    all_data = ([headers] + list(rows)) if headers else list(rows)
+    if not all_data: return ""
+    cols   = max(len(r) for r in all_data)
     widths = [0] * cols
-    for row in all_rows:
+    for row in all_data:
         for i, cell in enumerate(row):
             widths[i] = max(widths[i], vlen(str(cell)))
-    def fpad(cell, w):
-        s = str(cell)
-        return s + " " * (w - vlen(s))
-    sep = "  " * pad
     out = []
+    out.append(box_top(widths, color=color))
     if headers:
-        out.append(sep + ("  " * pad).join(fpad(headers[i], widths[i]) for i in range(cols)))
-        out.append(sep + ("  " * pad).join("-" * widths[i] for i in range(cols)))
-        for row in rows:
-            out.append(sep + ("  " * pad).join(fpad(row[i] if i < len(row) else "", widths[i]) for i in range(cols)))
-    else:
-        for row in rows:
-            out.append(sep + ("  " * pad).join(fpad(row[i] if i < len(row) else "", widths[i]) for i in range(cols)))
+        # cabeçalho com fundo destacado
+        hcells = [f"{hcolor}{C.BOLD}{h}{C.RST}" for h in headers]
+        # re-calcular larguras com headers originais (sem cor)
+        out.append(box_row(hcells, widths, vc=hcolor))
+        out.append(box_mid(widths, color=color))
+    for idx, row in enumerate(rows):
+        out.append(box_row(list(row), widths, vc=C.GRY))
+        if sep_every and (idx+1) % sep_every == 0 and idx < len(rows)-1:
+            out.append(box_sep(widths, color=C.GRY))
+    out.append(box_bot(widths, color=color))
     return "\n".join(out)
 
-# ── UI: boxes e seções ────────────────────────────────────────────────────────
-def box_line(char="─", color=C.CYN):
-    return f"{color}{C.BOLD}{'─' * WIDTH}{C.RST}"
-
-def section(title, icon="", color=C.CYN):
-    ic = f"{icon} " if icon else ""
-    print(f"\n{color}{C.BOLD}┌{'─' * (WIDTH-2)}┐{C.RST}")
-    print(f"{color}{C.BOLD}│  {ic}{title:<{WIDTH-5}}│{C.RST}")
-    print(f"{color}{C.BOLD}└{'─' * (WIDTH-2)}┘{C.RST}")
-
-def subsection(title, color=C.GRY):
-    print(f"\n  {color}{C.BOLD}▶  {title}{C.RST}")
-    print(f"  {color}{'╌' * (WIDTH-4)}{C.RST}")
-
-def tag(text, color=C.CYN):
-    return f"{color}{C.BOLD}[{text}]{C.RST}"
-
-def badge_yes(t="SIM"): return f"{C.BOLD}{C.GRN} {t} {C.RST}"
-def badge_no(t="NÃO"):  return f"{C.BOLD}{C.RED} {t} {C.RST}"
-def badge(t, color=C.CYN): return f"{C.BOLD}{color} {t} {C.RST}"
-
-def kv(key, val, kw=18):
-    k = f"{C.GRY}{key:<{kw}}{C.RST}"
-    return f"  {k}  {val}"
-
-def print_kv(key, val, kw=18):
-    print(kv(key, val, kw))
-
-def yes_no(val):
-    s = str(val).lower()
-    if val is True  or s in ("true","yes","1"):  return badge_yes()
-    if val is False or s in ("false","no","0"): return badge_no()
-    return DASH
-
-def na(val): return DASH if (val is None or val=="" or val==[] or val==0) else str(val)
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def section(title, icon="◈", color=C.CYN):
+    ic = f"{icon}  " if icon else ""
+    print(f"\n{color}{C.BOLD}┌{'─'*76}┐{C.RST}")
+    t = f"{ic}{title}"
+    print(f"{color}{C.BOLD}│  {t:<75}│{C.RST}")
+    print(f"{color}{C.BOLD}└{'─'*76}┘{C.RST}")
 
 def fmt_speed(mbps):
     if not mbps: return DASH
-    if mbps >= 1_000_000: return yellow(f"{mbps//1_000_000} Tbps")
-    if mbps >= 1_000:     return yellow(f"{mbps//1_000} Gbps")
-    return yellow(f"{mbps} Mbps")
+    if mbps >= 1_000_000: return bold(yellow(f"{mbps//1_000_000} Tbps"))
+    if mbps >= 1_000:     return bold(yellow(f"{mbps//1_000} Gbps"))
+    return bold(yellow(f"{mbps} Mbps"))
 
 def fmt_ips(ips):
-    """Exibe IPs compactos: primeiro IP + badge se houver mais."""
     if not ips: return DASH
-    if len(ips) == 1: return cyan(ips[0])
-    return cyan(ips[0]) + gray(f" +{len(ips)-1}")
+    first = cyan(ips[0])
+    return first + (gray(f" +{len(ips)-1}") if len(ips) > 1 else "")
+
+def yes_no(val):
+    s = str(val).lower()
+    if val is True  or s in ("true","yes","1"):  return f"{C.BOLD}{C.GRN} ✔ SIM {C.RST}"
+    if val is False or s in ("false","no","0"): return f"{C.BOLD}{C.RED} ✘ NÃO {C.RST}"
+    return DASH
+
+def na(val): return DASH if (val is None or val=="" or val==[] or val==0) else str(val)
 
 def fmt_date(d):
     if not d: return DASH
     try: return datetime.fromisoformat(str(d).replace("Z","+00:00")).strftime("%d/%m/%Y")
     except: return str(d)[:10]
+
+def badge_rs(val):  return f"{C.BOLD}{C.GRN} RS  {C.RST}" if val else gray("  —  ")
+def badge_bfd(val): return f"{C.BOLD}{C.CYN} BFD {C.RST}" if val else gray("  —  ")
+def badge_op(val):  return f"{C.GRN}●{C.RST}" if val else f"{C.RED}●{C.RST}"
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 def get(url, params=None, retries=MAX_RETRIES):
@@ -136,8 +140,8 @@ def get(url, params=None, retries=MAX_RETRIES):
         try:
             r = requests.get(url, params=params, headers=headers, timeout=15)
             if r.status_code == 429:
-                w = RETRY_DELAY * (attempt+1)
-                print(yellow(f"  ⏳ Rate limit, aguardando {w}s...")); time.sleep(w); continue
+                w = RETRY_DELAY*(attempt+1)
+                print(yellow(f"  ⏳ Rate limit {w}s...")); time.sleep(w); continue
             if r.status_code == 404: return None
             r.raise_for_status()
             return r.json()
@@ -149,35 +153,34 @@ def get(url, params=None, retries=MAX_RETRIES):
             print(red(f"  Erro: {e}")); break
     return None
 
-# ── RIPE Stat ─────────────────────────────────────────────────────────────────
-def ripe_overview(asn):   return get(f"{RIPE_API}/as-overview/data.json",       {"resource": f"AS{asn}"})
-def ripe_prefixes(asn):   return get(f"{RIPE_API}/announced-prefixes/data.json", {"resource": f"AS{asn}"})
-def ripe_neighbours(asn): return get(f"{RIPE_API}/asn-neighbours/data.json",    {"resource": f"AS{asn}", "lod": 1})
+# ── APIs ──────────────────────────────────────────────────────────────────────
+def ripe_overview(asn):   return get(f"{RIPE_API}/as-overview/data.json",        {"resource":f"AS{asn}"})
+def ripe_prefixes(asn):   return get(f"{RIPE_API}/announced-prefixes/data.json", {"resource":f"AS{asn}"})
+def ripe_neighbours(asn): return get(f"{RIPE_API}/asn-neighbours/data.json",     {"resource":f"AS{asn}","lod":1})
 
-# ── PeeringDB ─────────────────────────────────────────────────────────────────
 def pdb_net(asn):
-    d = get(f"{PEERINGDB_API}/net", {"asn": asn, "depth": 2})
+    d = get(f"{PEERINGDB_API}/net", {"asn":asn,"depth":2})
     return d["data"][0] if d and d.get("data") else None
 
 def pdb_netixlan(net_id):
-    d = get(f"{PEERINGDB_API}/netixlan", {"net_id": net_id, "depth": 2})
-    return d.get("data", []) if d else []
+    d = get(f"{PEERINGDB_API}/netixlan", {"net_id":net_id,"depth":2})
+    return d.get("data",[]) if d else []
 
 def pdb_netfac(net_id):
-    d = get(f"{PEERINGDB_API}/netfac", {"net_id": net_id, "depth": 2})
-    return d.get("data", []) if d else []
+    d = get(f"{PEERINGDB_API}/netfac", {"net_id":net_id,"depth":2})
+    return d.get("data",[]) if d else []
 
 def pdb_search(query):
-    d = get(f"{PEERINGDB_API}/net", {"name__contains": query, "depth": 1})
-    return d.get("data", []) if d else []
+    d = get(f"{PEERINGDB_API}/net", {"name__contains":query,"depth":1})
+    return d.get("data",[]) if d else []
 
 def build_ix_map(ixlans):
     m = {}
     for e in ixlans:
         ix_id = e.get("ix_id") or e.get("ixlan_id")
         if ix_id not in m:
-            m[ix_id] = {"name": e.get("name","") or f"IX-{ix_id}",
-                         "speed":0, "ipv4":[], "ipv6":[],
+            m[ix_id] = {"name":e.get("name","") or f"IX-{ix_id}",
+                         "speed":0,"ipv4":[],"ipv6":[],
                          "rs":e.get("is_rs_peer",False),
                          "bfd":e.get("bfd_support",False),
                          "op":e.get("operational",True)}
@@ -186,65 +189,98 @@ def build_ix_map(ixlans):
         if e.get("speed",0) > m[ix_id]["speed"]: m[ix_id]["speed"] = e["speed"]
     return m
 
-# ── Banner ────────────────────────────────────────────────────────────────────
+# ── Banner / Logo ─────────────────────────────────────────────────────────────
+LOGO = r"""
+   ██████╗  ██████╗ ██████╗ ███╗  ██╗██████╗
+   ██╔══██╗██╔════╝ ██╔══██╗████╗ ██║██╔══██╗
+   ██████╦╝██║  ███╗██████╔╝██╔██╗██║██████╔╝
+   ██╔══██╗██║   ██║██╔═══╝ ██║╚████║██╔══██╗
+   ██████╔╝╚██████╔╝██║     ██║ ╚███║██║  ██║
+   ╚═════╝  ╚═════╝ ╚═╝     ╚═╝  ╚══╝╚═╝  ╚═╝
+"""
+
 def banner():
     print()
-    print(f"  {C.BOLD}{C.CYN}╔{'═'*(WIDTH-4)}╗{C.RST}")
-    title = "bgpnr  ·  BGP Network Recon  ·  v3.0"
-    pad   = WIDTH - 4 - len(title)
-    print(f"  {C.BOLD}{C.CYN}║  {title}{' '*pad}║{C.RST}")
-    sub   = "RIPE Stat  +  PeeringDB"
-    pad2  = WIDTH - 4 - len(sub)
-    print(f"  {C.BOLD}{C.GRY}║  {sub}{' '*pad2}{C.CYN}║{C.RST}")
-    print(f"  {C.BOLD}{C.CYN}╚{'═'*(WIDTH-4)}╝{C.RST}")
+    for line in LOGO.split("\n"):
+        print(f"  {C.BOLD}{C.CYN}{line}{C.RST}")
+    # rodapé do banner
+    info = "BGP Network Recon  v4.0  |  RIPE Stat  +  PeeringDB"
+    pad  = (74 - len(info)) // 2
+    print(f"  {C.GRY}{'─'*76}{C.RST}")
+    print(f"  {C.GRY}{' '*pad}{info}{C.RST}")
+    print(f"  {C.GRY}{'─'*76}{C.RST}")
     print()
 
-# ── Seções de exibição ────────────────────────────────────────────────────────
+# ── Seções ────────────────────────────────────────────────────────────────────
 
 def show_header(asn, pdb, ripe_ov):
-    rov  = (ripe_ov or {}).get("data", {})
-    name = (pdb.get("name") if pdb else "") or rov.get("holder","") or DASH
+    rov       = (ripe_ov or {}).get("data",{})
+    name      = (pdb.get("name") if pdb else "") or rov.get("holder","") or DASH
     name_long = (pdb.get("name_long","") if pdb else "")
     country   = ((pdb.get("org") or {}).get("country","") if pdb else "") or ""
     website   = (pdb.get("website","") if pdb else "") or ""
     rir       = (pdb.get("rir_status","") if pdb else "") or ""
 
-    section(f"AS{asn}  —  {name}", "◈", C.CYN)
+    section(f"AS{asn}  —  {ANSI.sub('',name)}", "◈", C.CYN)
     print()
 
-    # Coluna esquerda / direita
-    left, right = [], []
-    left.append(("ASN",        f"{C.BOLD}AS{asn}{C.RST}"))
-    left.append(("Nome",       bold(green(name))))
+    # ── Tabela de 2 colunas com divisor vertical ──────────────────────────────
+    left = [
+        (gray("ASN"),         bold(cyan(f"AS{asn}"))),
+        (gray("Nome"),        bold(green(name))),
+    ]
     if name_long and name_long != name:
-        left.append(("Nome longo", white(name_long)))
+        left.append((gray("Nome longo"), white(name_long)))
     if pdb and pdb.get("aka"):
-        left.append(("Também conhecido", gray(pdb["aka"])))
-    left.append(("País",       white(country) if country else DASH))
-    left.append(("RIR",        white(rir) if rir else DASH))
-    left.append(("Website",    blue(website) if website else DASH))
+        left.append((gray("Conhecido"), gray(pdb["aka"])))
+    left += [
+        (gray("País"),    white(country) if country else DASH),
+        (gray("RIR"),     white(rir)     if rir     else DASH),
+        (gray("Website"), blue(website)  if website else DASH),
+    ]
 
+    right = []
     if pdb:
-        right.append(("Tipo",       yellow(na(pdb.get("info_type")))))
-        right.append(("Escopo",     white(na(pdb.get("info_scope")))))
-        right.append(("Tráfego",    cyan(na(pdb.get("info_traffic")))))
-        right.append(("Ratio",      white(na(pdb.get("info_ratio")))))
-        right.append(("IPv6",       yes_no(pdb.get("info_ipv6"))))
-        right.append(("Multicast",  yes_no(pdb.get("info_multicast"))))
-        right.append(("IXs",        bold(cyan(str(pdb.get("ix_count",0)))) if pdb.get("ix_count") else DASH))
-        right.append(("Facilities", bold(cyan(str(pdb.get("fac_count",0)))) if pdb.get("fac_count") else DASH))
+        right += [
+            (gray("Tipo"),       yellow(na(pdb.get("info_type")))),
+            (gray("Escopo"),     white(na(pdb.get("info_scope")))),
+            (gray("Tráfego"),    cyan(na(pdb.get("info_traffic")))),
+            (gray("Ratio"),      white(na(pdb.get("info_ratio")))),
+            (gray("IPv6"),       yes_no(pdb.get("info_ipv6"))),
+            (gray("Multicast"),  yes_no(pdb.get("info_multicast"))),
+            (gray("IXs"),        bold(cyan(str(pdb["ix_count"])))    if pdb.get("ix_count")  else DASH),
+            (gray("Facilities"), bold(cyan(str(pdb["fac_count"])))   if pdb.get("fac_count") else DASH),
+        ]
         if pdb.get("irr_as_set"):
-            right.append(("IRR AS-Set", magenta(pdb["irr_as_set"])))
+            right.append((gray("IRR AS-Set"),    magenta(pdb["irr_as_set"])))
         if pdb.get("looking_glass"):
-            right.append(("Looking Glass", blue(pdb["looking_glass"])))
+            right.append((gray("Looking Glass"), blue(pdb["looking_glass"][:40])))
 
-    kw = 16
-    for i in range(max(len(left), len(right))):
+    # Larguras fixas para as colunas
+    kw, vw = 14, 32   # key width, value width
+    lw = kw + vw + 5  # total largura coluna esquerda
+    rw = kw + vw + 5  # total largura coluna direita
+    div = f"{C.GRY}│{C.RST}"
+
+    rows_n = max(len(left), len(right))
+    # cabeçalho
+    print(f"  {C.GRY}┌{'─'*(lw)}┬{'─'*(rw)}┐{C.RST}")
+
+    for i in range(rows_n):
         lk, lv = left[i]  if i < len(left)  else ("", "")
         rk, rv = right[i] if i < len(right) else ("", "")
-        lpart = f"{C.GRY}{lk:<{kw}}{C.RST}  {lv}" if lk else " " * (kw + 2 + 20)
-        rpart = f"  {C.GRY}{rk:<{kw}}{C.RST}  {rv}" if rk else ""
-        print(f"  {lpart}{rpart}")
+
+        def cell(k, v):
+            ks = ANSI.sub("", str(k)); vs = ANSI.sub("", str(v))
+            kp = str(k) + " " * max(0, kw - len(ks))
+            vp = str(v) + " " * max(0, vw - len(vs))
+            return f" {kp}  {vp} "
+
+        lc = cell(lk, lv)
+        rc = cell(rk, rv)
+        print(f"  {C.GRY}│{C.RST}{lc}{div}{rc}{C.GRY}│{C.RST}")
+
+    print(f"  {C.GRY}└{'─'*(lw)}┴{'─'*(rw)}┘{C.RST}")
     print()
 
 
@@ -253,8 +289,8 @@ def show_policy(pdb):
     fields = [
         ("Política geral",     pdb.get("policy_general","")),
         ("URL da política",    pdb.get("policy_url","")),
-        ("Restrição de local", pdb.get("policy_locations","")),
-        ("Restrição de ratio", pdb.get("policy_ratio","")),
+        ("Restrição local",    pdb.get("policy_locations","")),
+        ("Restrição ratio",    pdb.get("policy_ratio","")),
         ("Contratos",          pdb.get("policy_contracts","")),
     ]
     never_rs = pdb.get("info_never_via_route_servers", False)
@@ -262,28 +298,32 @@ def show_policy(pdb):
 
     section("Política de Peering", "⚖", C.YLW)
     print()
+    rows = []
     for k, v in fields:
         if v:
-            color = yellow if k == "Política geral" else white
-            print_kv(k, color(v))
-    print_kv("Nunca via RS", yes_no(never_rs))
+            val = yellow(v) if k == "Política geral" else white(v)
+            rows.append([gray(k), val])
+    rows.append([gray("Nunca via RS"), yes_no(never_rs)])
+    print(vtable(rows, color=C.YLW, hcolor=C.YLW))
     print()
 
 
 def show_contacts(pdb):
     if not pdb: return
-    pocs = pdb.get("poc_set", [])
+    pocs = pdb.get("poc_set",[])
     if not pocs: return
-    section("Contatos NOC / Técnico / Peering", "✉", C.GRN)
+    section("Contatos", "✉", C.GRN)
     print()
     rows = []
     for p in pocs:
-        role  = tag(p.get("role",""),  C.GRN)
-        name  = bold(p.get("name","") or DASH)
+        role  = bold(green(p.get("role","")))
+        name  = bold(white(p.get("name","") or "—"))
         email = cyan(p.get("email","")) if p.get("email") else DASH
         phone = white(p.get("phone","")) if p.get("phone") else DASH
         rows.append([role, name, email, phone])
-    print(table(rows, headers=[gray("Papel"), gray("Nome"), gray("E-mail"), gray("Telefone")]))
+    print(vtable(rows,
+        headers=[gray("Papel"), gray("Nome"), gray("E-mail"), gray("Telefone")],
+        color=C.GRN, hcolor=C.GRN))
     print()
 
 
@@ -293,28 +333,24 @@ def show_prefixes(asn):
     if not data or not data.get("data"):
         print(red("  Sem dados de prefixos.")); return
 
-    pfxs = data["data"].get("prefixes", [])
+    pfxs = data["data"].get("prefixes",[])
     v4 = sorted([p for p in pfxs if ":" not in p.get("prefix","")], key=lambda x: x["prefix"])
     v6 = sorted([p for p in pfxs if ":" in  p.get("prefix","")],    key=lambda x: x["prefix"])
 
-    if v4:
-        print(f"\n  {bold(magenta(f'IPv4'))}  {gray(f'{len(v4)} prefixo(s)')}")
-        # Exibe em 3 colunas
-        col_w = 20
-        cols  = 3
-        for i in range(0, len(v4), cols):
-            row = v4[i:i+cols]
-            line = "  ".join(f"{cyan(p['prefix']):<{col_w+10}}" for p in row)
-            print(f"  {line}")
-
-    if v6:
-        print(f"\n  {bold(magenta(f'IPv6'))}  {gray(f'{len(v6)} prefixo(s)')}")
-        col_w = 26
-        cols  = 2
-        for i in range(0, len(v6), cols):
-            row = v6[i:i+cols]
-            line = "  ".join(f"{cyan(p['prefix']):<{col_w+10}}" for p in row)
-            print(f"  {line}")
+    for label, plist, col_w, ncols in [("IPv4", v4, 20, 3), ("IPv6", v6, 26, 2)]:
+        if not plist: continue
+        print(f"\n  {C.BOLD}{C.MAG}  {label}  {C.RST}{gray(f'{len(plist)} prefixo(s)')}")
+        # tabela com bordas
+        rows_grid = [plist[i:i+ncols] for i in range(0, len(plist), ncols)]
+        widths = [col_w] * ncols
+        print(f"  {C.MAG}┌{'┬'.join('─'*(w+2) for w in widths)}┐{C.RST}")
+        for row in rows_grid:
+            cells = [cyan(p["prefix"]) + " " * max(0, col_w - len(p["prefix"])) for p in row]
+            while len(cells) < ncols:
+                cells.append(" " * col_w)
+            bar = f"{C.MAG}│{C.RST}"
+            print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
+        print(f"  {C.MAG}└{'┴'.join('─'*(w+2) for w in widths)}┘{C.RST}")
 
     if not v4 and not v6:
         print(gray("  Nenhum prefixo encontrado."))
@@ -325,41 +361,41 @@ def show_neighbours(asn):
     data = ripe_neighbours(asn); time.sleep(REQ_DELAY)
     if not data or not data.get("data"): return
 
-    nb    = data["data"].get("neighbours", [])
-    ups   = sorted([n for n in nb if n.get("type") == "left"],      key=lambda x: -x.get("power",0))
-    dns   = sorted([n for n in nb if n.get("type") == "right"],     key=lambda x: -x.get("power",0))
-    peers = sorted([n for n in nb if n.get("type") == "uncertain"], key=lambda x: x.get("asn",0))
+    nb    = data["data"].get("neighbours",[])
+    ups   = sorted([n for n in nb if n.get("type")=="left"],      key=lambda x: -x.get("power",0))
+    dns   = sorted([n for n in nb if n.get("type")=="right"],     key=lambda x: -x.get("power",0))
+    peers = sorted([n for n in nb if n.get("type")=="uncertain"], key=lambda x:  x.get("asn",0))
+
+    def asn_grid(items, fn, ncols=5):
+        w = 14
+        rows = [items[i:i+ncols] for i in range(0, len(items), ncols)]
+        bar = f"{C.GRY}│{C.RST}"
+        widths = [w] * ncols
+        print(f"  {C.GRY}┌{'┬'.join('─'*(w+2) for _ in widths)}┐{C.RST}")
+        for row in rows:
+            cells = [fn(n) + " " * max(0, w - vlen(fn(n))) for n in row]
+            while len(cells) < ncols: cells.append(" " * w)
+            print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
+        print(f"  {C.GRY}└{'┴'.join('─'*(w+2) for _ in widths)}┘{C.RST}")
 
     if ups:
         section(f"Upstream Providers  ({len(ups)})", "▲", C.BLU)
         print()
-        cols = 4
-        for i in range(0, len(ups), cols):
-            row = ups[i:i+cols]
-            parts = [(bold(f'AS{n["asn"]}') + ' ' * max(0, 22 - len(f'AS{n["asn"]}'))).ljust(22) for n in row]
-            print("  " + "  ".join(parts))
+        asn_grid(ups, lambda n: bold(blue(f"AS{n['asn']}")))
         print()
 
     if dns:
         section(f"Downstream Customers  ({len(dns)})", "▼", C.GRN)
         print()
-        cols = 4
-        for i in range(0, len(dns), cols):
-            row = dns[i:i+cols]
-            asn_str = lambda n, fn=green: fn(f'AS{n["asn"]}'); parts = [asn_str(n) + ' ' * max(0, 22 - len(f'AS{n["asn"]}')) for n in row]
-            print("  " + "  ".join(parts))
+        asn_grid(dns, lambda n: bold(green(f"AS{n['asn']}")))
         print()
 
     if peers:
+        shown = peers[:50]
         section(f"Peers  ({len(peers)})", "↔", C.GRY)
         print()
-        cols = 6
-        shown = peers[:48]
-        for i in range(0, len(shown), cols):
-            row = shown[i:i+cols]
-            asn_str = lambda n, fn=gray: fn(f'AS{n["asn"]}'); parts = [asn_str(n) + ' ' * max(0, 18 - len(f'AS{n["asn"]}')) for n in row]
-            print("  " + "  ".join(parts))
-        if len(peers) > 48: print(gray(f"\n  ... e mais {len(peers)-48} peers"))
+        asn_grid(shown, lambda n: gray(f"AS{n['asn']}"), ncols=6)
+        if len(peers) > 50: print(gray(f"\n  ... e mais {len(peers)-50} peers"))
         print()
 
 
@@ -368,7 +404,7 @@ def show_ixs(pdb, net_id):
     if not pdb or not net_id:
         print(gray("  ASN não encontrado no PeeringDB.")); return
 
-    ixlans = pdb.get("netixlan_set", []) or pdb_netixlan(net_id)
+    ixlans = pdb.get("netixlan_set",[]) or pdb_netixlan(net_id)
     if not ixlans:
         print(gray("  Nenhum IX encontrado.")); return
 
@@ -376,21 +412,19 @@ def show_ixs(pdb, net_id):
     print()
     rows = []
     for d in sorted(ix_map.values(), key=lambda x: x["name"]):
-        op  = f"{C.GRN}●{C.RST}" if d["op"]   else f"{C.RED}●{C.RST}"
-        rs  = badge("RS",  C.GRN) if d["rs"]  else gray("  —  ")
-        bfd = badge("BFD", C.CYN) if d["bfd"] else gray("  —  ")
         rows.append([
-            f"{op} {bold(d['name'][:40])}",
+            f"{badge_op(d['op'])} {bold(d['name'][:40])}",
             fmt_speed(d["speed"]),
             fmt_ips(d["ipv4"]),
             fmt_ips(d["ipv6"]),
-            rs, bfd,
+            badge_rs(d["rs"]),
+            badge_bfd(d["bfd"]),
         ])
-    print(table(rows, headers=[
-        gray("Internet Exchange"), gray("Velocidade"),
-        gray("IPv4"), gray("IPv6"), gray("RS"), gray("BFD")
-    ]))
-    print(f"\n  {gray('Total:')} {bold(cyan(str(len(ix_map))))} {gray('IX(s)')}")
+    print(vtable(rows,
+        headers=[gray("Internet Exchange"), gray("Velocidade"),
+                 gray("IPv4"), gray("IPv6"), gray("RS"), gray("BFD")],
+        color=C.CYN, hcolor=C.CYN))
+    print(f"\n  {gray('Total:')} {bold(cyan(str(len(ix_map))))} IX(s)")
     print()
 
 
@@ -399,7 +433,7 @@ def show_facilities(pdb, net_id):
     if not pdb or not net_id:
         print(gray("  ASN não encontrado no PeeringDB.")); return
 
-    facs = pdb.get("netfac_set", []) or pdb_netfac(net_id)
+    facs = pdb.get("netfac_set",[]) or pdb_netfac(net_id)
     if not facs:
         print(gray("  Nenhuma facility encontrada.")); return
 
@@ -407,104 +441,12 @@ def show_facilities(pdb, net_id):
     rows = []
     for f in sorted(facs, key=lambda x: x.get("name","") or ""):
         name = f.get("name","") or f"FAC-{f.get('fac_id','')}"
-        loc  = ", ".join(filter(None, [f.get("city",""), f.get("country","")])) or DASH
-        rows.append([bold(name[:50]), gray(loc)])
-    print(table(rows, headers=[gray("Facility"), gray("Localização")]))
-    print(f"\n  {gray('Total:')} {bold(cyan(str(len(facs))))} {gray('facility(ies)')}")
-    print()
-
-
-# ── Transit vs IXs ────────────────────────────────────────────────────────────
-
-def transit_vs_ix(asn):
-    banner()
-    print(f"  Analisando trânsito IP e IXs de {bold(cyan(f'AS{asn}'))} ...\n")
-
-    nb_data = ripe_neighbours(asn); time.sleep(REQ_DELAY)
-    if not nb_data or not nb_data.get("data"):
-        print(red("  Sem dados no RIPE Stat.")); return
-
-    ups = [n for n in nb_data["data"].get("neighbours",[]) if n.get("type") == "left"]
-    if not ups:
-        print(gray("  Nenhum upstream encontrado.")); return
-
-    pdb_main = pdb_net(asn); time.sleep(REQ_DELAY)
-    if not pdb_main:
-        print(red("  ASN não encontrado no PeeringDB.")); return
-
-    name_main = pdb_main.get("name","") or f"AS{asn}"
-    ixlans_main = pdb_main.get("netixlan_set") or pdb_netixlan(pdb_main["id"]); time.sleep(REQ_DELAY)
-    if not ixlans_main:
-        print(gray("  ASN não presente em nenhum IX.")); return
-
-    map_main   = build_ix_map(ixlans_main)
-    up_asns    = [n["asn"] for n in ups]
-
-    print(f"  {bold(green(name_main))}  →  {bold(cyan(str(len(map_main))))} IX(s)  |  {bold(str(len(up_asns)))} upstream(s)\n")
-
-    results_common, results_none, results_nopdb = [], [], []
-
-    for up_asn in sorted(up_asns):
-        sys.stdout.write(f"\r  {gray(f'Verificando AS{up_asn} ...')}   ")
-        sys.stdout.flush()
-        pdb_up = pdb_net(up_asn); time.sleep(REQ_DELAY)
-        if not pdb_up:
-            results_nopdb.append(up_asn); continue
-        up_name   = pdb_up.get("name","") or f"AS{up_asn}"
-        ixlans_up = pdb_up.get("netixlan_set") or pdb_netixlan(pdb_up["id"]); time.sleep(REQ_DELAY)
-        if not ixlans_up:
-            results_none.append({"asn":up_asn,"name":up_name,"reason":"Não presente em IXs"}); continue
-        map_up = build_ix_map(ixlans_up)
-        common = set(map_main.keys()) & set(map_up.keys())
-        if not common:
-            results_none.append({"asn":up_asn,"name":up_name,"reason":f"{len(map_up)} IXs, nenhum em comum"}); continue
-        results_common.append({"asn":up_asn,"name":up_name,"common":common,"map_up":map_up})
-
-    print("\r" + " " * 50 + "\r", end="")
-
-    if results_common:
-        section(f"Oportunidades de Peering Direto  ({len(results_common)})", "★", C.GRN)
-        print(f"\n  {gray('Estes upstreams compartilham IX com você — candidatos a peering gratuito.')}\n")
-        for r in results_common:
-            up_asn, up_name = r["asn"], r["name"]
-            n_c = len(r["common"])
-            print(f"  {bold(green(f'AS{up_asn}'))}  {bold(white(up_name))}  {gray(f'— {n_c} IX(s) em comum')}")
-            rows = []
-            for ix_id in sorted(r["common"], key=lambda x: map_main[x]["name"]):
-                dm, du = map_main[ix_id], r["map_up"][ix_id]
-                rows.append([
-                    bold(dm["name"][:36]),
-                    fmt_speed(dm["speed"]), fmt_speed(du["speed"]),
-                    fmt_ips(dm["ipv4"]),    fmt_ips(du["ipv4"]),
-                    fmt_ips(dm["ipv6"]),    fmt_ips(du["ipv6"]),
-                    badge("RS",C.GRN) if dm["rs"] else gray("—"),
-                    badge("RS",C.GRN) if du["rs"] else gray("—"),
-                ])
-            print(table(rows, headers=[
-                gray("IX"),
-                gray(f"Vel AS{asn}"), gray(f"Vel AS{up_asn}"),
-                gray(f"IPv4 AS{asn}"), gray(f"IPv4 AS{up_asn}"),
-                gray(f"IPv6 AS{asn}"), gray(f"IPv6 AS{up_asn}"),
-                gray("RS Meu"), gray("RS Trânsito"),
-            ]))
-            print()
-
-    if results_none:
-        section(f"Upstreams sem IX em Comum  ({len(results_none)})", "○", C.GRY)
-        print()
-        rows = [[bold(f"AS{r['asn']}"), white(r['name'][:42]), gray(r['reason'])] for r in results_none]
-        print(table(rows, headers=[gray("ASN"), gray("Nome"), gray("Situação")]))
-        print()
-
-    if results_nopdb:
-        section(f"Não encontrados no PeeringDB  ({len(results_nopdb)})", "?", C.GRY)
-        print()
-        cols = 6
-        for i in range(0, len(results_nopdb), cols):
-            print("  " + "  ".join(gray(f"AS{a}") for a in results_nopdb[i:i+cols]))
-        print()
-
-    print(gray(f"  Fontes: RIPE Stat + PeeringDB"))
+        loc  = ", ".join(filter(None,[f.get("city",""), f.get("country","")])) or DASH
+        rows.append([bold(white(name[:52])), gray(loc)])
+    print(vtable(rows,
+        headers=[gray("Facility"), gray("Localização")],
+        color=C.YLW, hcolor=C.YLW))
+    print(f"\n  {gray('Total:')} {bold(cyan(str(len(facs))))} facility(ies)")
     print()
 
 
@@ -512,11 +454,10 @@ def transit_vs_ix(asn):
 
 def compare_ixs(asn1, asn2):
     banner()
-    print(f"  Comparando IXs entre {bold(cyan(f'AS{asn1}'))} e {bold(cyan(f'AS{asn2}'))} ...\n")
+    print(f"  Comparando {bold(cyan(f'AS{asn1}'))} ↔ {bold(cyan(f'AS{asn2}'))} ...\n")
 
     pdb1 = pdb_net(asn1); time.sleep(REQ_DELAY)
     pdb2 = pdb_net(asn2); time.sleep(REQ_DELAY)
-
     name1 = (pdb1.get("name","") if pdb1 else "") or f"AS{asn1}"
     name2 = (pdb2.get("name","") if pdb2 else "") or f"AS{asn2}"
 
@@ -533,14 +474,15 @@ def compare_ixs(asn1, asn2):
     only2  = set(map2.keys()) - common
 
     # Resumo
-    print(f"  {bold(green(name1))} {gray(f'AS{asn1}')}  →  {bold(cyan(str(len(map1))))} IXs")
-    print(f"  {bold(green(name2))} {gray(f'AS{asn2}')}  →  {bold(cyan(str(len(map2))))} IXs")
+    print(vtable([
+        [bold(cyan(f"AS{asn1}")), bold(green(name1[:35])), bold(cyan(str(len(map1)))), gray("IXs")],
+        [bold(cyan(f"AS{asn2}")), bold(green(name2[:35])), bold(cyan(str(len(map2)))), gray("IXs")],
+        [gray("Em comum"), "", bold(yellow(str(len(common)))), gray("IXs")],
+    ], color=C.CYN, hcolor=C.CYN))
     print()
 
     if not common:
-        print(red(f"  Nenhum IX em comum."))
-        print(gray("  Os dois ASNs não compartilham pontos de troca no PeeringDB."))
-        return
+        print(red("  Nenhum IX em comum encontrado.")); return
 
     section(f"IXs em Comum  ({len(common)})  —  AS{asn1} ↔ AS{asn2}", "★", C.GRN)
     print()
@@ -548,41 +490,141 @@ def compare_ixs(asn1, asn2):
     for ix_id in sorted(common, key=lambda x: map1[x]["name"]):
         d1, d2 = map1[ix_id], map2[ix_id]
         rows.append([
-            bold(d1["name"][:36]),
+            bold(d1["name"][:34]),
             fmt_speed(d1["speed"]), fmt_speed(d2["speed"]),
             fmt_ips(d1["ipv4"]),    fmt_ips(d2["ipv4"]),
             fmt_ips(d1["ipv6"]),    fmt_ips(d2["ipv6"]),
-            badge("RS",C.GRN) if d1["rs"] else gray("—"),
-            badge("RS",C.GRN) if d2["rs"] else gray("—"),
+            badge_rs(d1["rs"]),     badge_rs(d2["rs"]),
         ])
-    print(table(rows, headers=[
+    print(vtable(rows, headers=[
         gray("Internet Exchange"),
         gray(f"Vel {asn1}"), gray(f"Vel {asn2}"),
         gray(f"IPv4 {asn1}"), gray(f"IPv4 {asn2}"),
         gray(f"IPv6 {asn1}"), gray(f"IPv6 {asn2}"),
         gray(f"RS {asn1}"), gray(f"RS {asn2}"),
-    ]))
+    ], color=C.GRN, hcolor=C.GRN))
 
-    if only1:
-        section(f"Exclusivos de AS{asn1} — {name1}  ({len(only1)})", "◈", C.CYN)
+    for asn_x, only_x, map_x, col in [
+        (asn1, only1, map1, C.CYN),
+        (asn2, only2, map2, C.MAG),
+    ]:
+        if not only_x: continue
+        nm = (pdb1 if asn_x==asn1 else pdb2).get("name","") or f"AS{asn_x}"
+        section(f"Exclusivos de AS{asn_x} — {nm}  ({len(only_x)})", "◈", col)
         print()
-        rows = [[bold(map1[ix]["name"][:48]), fmt_speed(map1[ix]["speed"])]
-                for ix in sorted(only1, key=lambda x: map1[x]["name"])]
-        print(table(rows, headers=[gray("Internet Exchange"), gray("Velocidade")]))
-
-    if only2:
-        section(f"Exclusivos de AS{asn2} — {name2}  ({len(only2)})", "◈", C.MAG)
-        print()
-        rows = [[bold(map2[ix]["name"][:48]), fmt_speed(map2[ix]["speed"])]
-                for ix in sorted(only2, key=lambda x: map2[x]["name"])]
-        print(table(rows, headers=[gray("Internet Exchange"), gray("Velocidade")]))
+        rows = [[bold(map_x[ix]["name"][:50]), fmt_speed(map_x[ix]["speed"])]
+                for ix in sorted(only_x, key=lambda x: map_x[x]["name"])]
+        print(vtable(rows, headers=[gray("Internet Exchange"), gray("Velocidade")],
+                     color=col, hcolor=col))
 
     print()
     print(gray("  Fonte: PeeringDB (peeringdb.com)"))
     print()
 
 
-# ── Busca por nome ────────────────────────────────────────────────────────────
+# ── Transit vs IXs ────────────────────────────────────────────────────────────
+
+def transit_vs_ix(asn):
+    banner()
+    print(f"  Trânsito IP vs IXs  —  {bold(cyan(f'AS{asn}'))}\n")
+
+    nb_data = ripe_neighbours(asn); time.sleep(REQ_DELAY)
+    if not nb_data or not nb_data.get("data"):
+        print(red("  Sem dados no RIPE Stat.")); return
+
+    ups = [n for n in nb_data["data"].get("neighbours",[]) if n.get("type")=="left"]
+    if not ups:
+        print(gray("  Nenhum upstream encontrado.")); return
+
+    pdb_main = pdb_net(asn); time.sleep(REQ_DELAY)
+    if not pdb_main:
+        print(red("  ASN não encontrado no PeeringDB.")); return
+
+    name_main   = pdb_main.get("name","") or f"AS{asn}"
+    ixlans_main = pdb_main.get("netixlan_set") or pdb_netixlan(pdb_main["id"]); time.sleep(REQ_DELAY)
+    if not ixlans_main:
+        print(gray("  ASN não presente em nenhum IX.")); return
+
+    map_main = build_ix_map(ixlans_main)
+
+    print(vtable([
+        [bold(cyan(f"AS{asn}")),  bold(green(name_main[:40])),  bold(cyan(str(len(map_main)))),     gray("IXs")],
+        [gray("Upstreams"),       gray("via RIPE Stat"),         bold(yellow(str(len(ups)))), gray("a verificar")],
+    ], color=C.CYN))
+    print()
+
+    results_common, results_none, results_nopdb = [], [], []
+    for up_asn in sorted(n["asn"] for n in ups):
+        sys.stdout.write(f"\r  {gray(f'Verificando AS{up_asn}...')}   ")
+        sys.stdout.flush()
+        pdb_up = pdb_net(up_asn); time.sleep(REQ_DELAY)
+        if not pdb_up:
+            results_nopdb.append(up_asn); continue
+        up_name   = pdb_up.get("name","") or f"AS{up_asn}"
+        ixlans_up = pdb_up.get("netixlan_set") or pdb_netixlan(pdb_up["id"]); time.sleep(REQ_DELAY)
+        if not ixlans_up:
+            results_none.append({"asn":up_asn,"name":up_name,"reason":"Sem IXs"}); continue
+        map_up = build_ix_map(ixlans_up)
+        common = set(map_main.keys()) & set(map_up.keys())
+        if not common:
+            results_none.append({"asn":up_asn,"name":up_name,"reason":f"{len(map_up)} IXs, nenhum em comum"}); continue
+        results_common.append({"asn":up_asn,"name":up_name,"common":common,"map_up":map_up})
+
+    print("\r" + " "*50 + "\r", end="")
+
+    if results_common:
+        section(f"Oportunidades de Peering Direto  ({len(results_common)})", "★", C.GRN)
+        print(f"\n  {gray('Estes upstreams estão no mesmo IX — candidatos a peering gratuito.')}\n")
+        for r in results_common:
+            up_asn, up_name, n_c = r["asn"], r["name"], len(r["common"])
+            print(f"  {bold(green(f'AS{up_asn}'))}  {bold(white(up_name[:40]))}  {gray(f'— {n_c} IX(s)')}")
+            rows = []
+            for ix_id in sorted(r["common"], key=lambda x: map_main[x]["name"]):
+                dm, du = map_main[ix_id], r["map_up"][ix_id]
+                rows.append([
+                    bold(dm["name"][:34]),
+                    fmt_speed(dm["speed"]), fmt_speed(du["speed"]),
+                    fmt_ips(dm["ipv4"]),    fmt_ips(du["ipv4"]),
+                    fmt_ips(dm["ipv6"]),    fmt_ips(du["ipv6"]),
+                    badge_rs(dm["rs"]),     badge_rs(du["rs"]),
+                ])
+            print(vtable(rows, headers=[
+                gray("IX"),
+                gray(f"Vel AS{asn}"), gray(f"Vel AS{up_asn}"),
+                gray(f"IPv4 AS{asn}"), gray(f"IPv4 AS{up_asn}"),
+                gray(f"IPv6 AS{asn}"), gray(f"IPv6 AS{up_asn}"),
+                gray("RS Meu"), gray("RS Trânsito"),
+            ], color=C.GRN, hcolor=C.GRN))
+            print()
+
+    if results_none:
+        section(f"Upstreams sem IX em Comum  ({len(results_none)})", "○", C.GRY)
+        print()
+        rows = [[bold(f"AS{r['asn']}"), white(r['name'][:40]), gray(r['reason'])] for r in results_none]
+        print(vtable(rows, headers=[gray("ASN"), gray("Nome"), gray("Situação")],
+                     color=C.GRY, hcolor=C.GRY))
+        print()
+
+    if results_nopdb:
+        section(f"Não encontrados no PeeringDB  ({len(results_nopdb)})", "?", C.GRY)
+        print()
+        cols = 6; w = 12
+        rows_g = [results_nopdb[i:i+cols] for i in range(0, len(results_nopdb), cols)]
+        bar = f"{C.GRY}│{C.RST}"
+        widths = [w]*cols
+        print(f"  {C.GRY}┌{'┬'.join('─'*(w+2) for _ in widths)}┐{C.RST}")
+        for row in rows_g:
+            cells = [gray(f"AS{a}") + " "*max(0,w-len(f"AS{a}")) for a in row]
+            while len(cells)<cols: cells.append(" "*w)
+            print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
+        print(f"  {C.GRY}└{'┴'.join('─'*(w+2) for _ in widths)}┘{C.RST}")
+        print()
+
+    print(gray("  Fontes: RIPE Stat + PeeringDB"))
+    print()
+
+
+# ── Busca ─────────────────────────────────────────────────────────────────────
 
 def search_and_select(query):
     print(f"\n  Buscando {bold(yellow(query))} ...\n")
@@ -594,27 +636,24 @@ def search_and_select(query):
                 results.append({"asn":item["asn"],"name":item.get("name",""),
                                  "desc":item.get("aka",""),"src":"PeeringDB"})
     if not results:
-        print(red("  Nenhum resultado encontrado.")); sys.exit(1)
-
-    rows = [[f"  {bold(str(i+1))}",
-             bold(cyan(f"AS{r['asn']}")),
-             bold(white(r['name'][:44])),
-             gray(r['desc'][:28]),
-             gray(r['src'])]
+        print(red("  Nenhum resultado.")); sys.exit(1)
+    rows = [[bold(cyan(str(i+1))), bold(cyan(f"AS{r['asn']}")),
+             bold(white(r['name'][:44])), gray(r['desc'][:28])]
             for i,r in enumerate(results)]
-    print(table(rows, headers=[gray("#"), gray("ASN"), gray("Nome"), gray("Descrição"), gray("Fonte")]))
+    print(vtable(rows, headers=[gray("#"), gray("ASN"), gray("Nome"), gray("Descrição")],
+                 color=C.CYN, hcolor=C.CYN))
     print()
     try:
-        choice = input(f"  {bold('Selecione o número')} {gray('(Enter cancela)')}: ").strip()
+        choice = input(f"  {bold(cyan('Selecione'))} {gray('(Enter cancela)')}: ").strip()
         if not choice: sys.exit(0)
         idx = int(choice)-1
         if 0 <= idx < len(results): return results[idx]["asn"]
-        print(red("  Opção inválida.")); sys.exit(1)
+        print(red("  Inválido.")); sys.exit(1)
     except (ValueError, KeyboardInterrupt):
         print(); sys.exit(0)
 
 
-# ── Run principal ─────────────────────────────────────────────────────────────
+# ── Run ───────────────────────────────────────────────────────────────────────
 
 def run(asn_or_name):
     clean = str(asn_or_name).strip().upper().lstrip("AS")
@@ -636,20 +675,21 @@ def run(asn_or_name):
     show_ixs(pdb, net_id)
     show_facilities(pdb, net_id)
 
-    auth = f"  {gray('PeeringDB: API Key ativa')}" if PEERINGDB_KEY else f"  {gray('Dica: export PEERINGDB_API_KEY=<chave>')}"
-    print(f"  {gray('Fontes: RIPE Stat (stat.ripe.net) + PeeringDB (peeringdb.com)')}")
-    print(auth)
+    print(gray("  Fontes: RIPE Stat (stat.ripe.net) + PeeringDB (peeringdb.com)"))
+    if PEERINGDB_KEY: print(gray("  PeeringDB: API Key ativa"))
+    else:             print(gray("  Dica: export PEERINGDB_API_KEY=<chave>"))
     print()
 
 
 def interactive():
     banner()
-    print(f"  {gray('Digite um ASN ou nome de organização para consultar.')}")
-    print(f"  {gray('Comandos disponíveis:')}")
-    print(f"  {bold('bgpnr 13335')}               {gray('→ consulta ASN')}")
-    print(f"  {bold('bgpnr Cloudflare')}          {gray('→ busca por nome')}")
-    print(f"  {bold('bgpnr --compare 1234 5678')} {gray('→ IXs em comum entre dois ASNs')}")
-    print(f"  {bold('bgpnr --transit 1234')}      {gray('→ trânsito IP vs IXs')}")
+    rows = [
+        [bold(cyan("bgpnr 13335")),               gray("→"), gray("consulta ASN")],
+        [bold(cyan("bgpnr Cloudflare")),           gray("→"), gray("busca por nome")],
+        [bold(cyan("bgpnr --compare 1234 5678")),  gray("→"), gray("IXs em comum entre dois ASNs")],
+        [bold(cyan("bgpnr --transit 1234")),       gray("→"), gray("trânsito IP vs IXs (peering)")],
+    ]
+    print(vtable(rows, color=C.GRY))
     print()
     try:
         query = input(f"  {bold(cyan('ASN / Organização'))}: ").strip()
@@ -666,9 +706,12 @@ if __name__ == "__main__":
             interactive()
         elif args[0] in ("-h","--help"):
             banner()
-            print(f"  bgpnr <ASN|nome>                  consulta ASN")
-            print(f"  bgpnr --compare <ASN1> <ASN2>     IXs em comum")
-            print(f"  bgpnr --transit <ASN>             trânsito IP vs IXs\n")
+            print(vtable([
+                [bold(cyan("bgpnr <ASN|nome>")),                gray("Consulta ASN ou busca por nome")],
+                [bold(cyan("bgpnr --compare <ASN1> <ASN2>")),   gray("IXs em comum entre dois ASNs")],
+                [bold(cyan("bgpnr --transit <ASN>")),           gray("Trânsito IP vs IXs")],
+            ], color=C.CYN))
+            print()
         elif args[0] in ("--compare","-c","compare") and len(args) >= 3:
             compare_ixs(int(str(args[1]).upper().lstrip("AS")),
                         int(str(args[2]).upper().lstrip("AS")))
