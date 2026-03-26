@@ -174,6 +174,12 @@ def pdb_search(query):
     d = get(f"{PEERINGDB_API}/net", {"name__contains":query,"depth":1})
     return d.get("data",[]) if d else []
 
+def ripe_routing_consistency(asn):
+    return get(f"{RIPE_API}/as-routing-consistency/data.json", {"resource":f"AS{asn}"})
+
+def ripe_abuse_contact(asn):
+    return get(f"{RIPE_API}/abuse-contact-finder/data.json", {"resource":f"AS{asn}"})
+
 def build_ix_map(ixlans):
     m = {}
     for e in ixlans:
@@ -233,10 +239,14 @@ def show_header(asn, pdb, ripe_ov):
         left.append((gray("Nome longo"), white(name_long)))
     if pdb and pdb.get("aka"):
         left.append((gray("Conhecido"), gray(pdb["aka"])))
+    alloc_date = fmt_date(((ripe_ov or {}).get("data",{}) or {}).get("block",{}).get("date_allocated",""))
+    announced  = ((ripe_ov or {}).get("data",{}) or {}).get("announced", None)
     left += [
-        (gray("País"),    white(country) if country else DASH),
-        (gray("RIR"),     white(rir)     if rir     else DASH),
-        (gray("Website"), blue(website)  if website else DASH),
+        (gray("País"),       white(country)    if country               else DASH),
+        (gray("RIR"),        white(rir)        if rir                   else DASH),
+        (gray("Alocado em"), white(alloc_date) if alloc_date != DASH    else DASH),
+        (gray("Anunciado"),  yes_no(announced) if announced is not None else DASH),
+        (gray("Website"),    blue(website)     if website               else DASH),
     ]
 
     right = []
@@ -251,6 +261,10 @@ def show_header(asn, pdb, ripe_ov):
             (gray("IXs"),        bold(cyan(str(pdb["ix_count"])))    if pdb.get("ix_count")  else DASH),
             (gray("Facilities"), bold(cyan(str(pdb["fac_count"])))   if pdb.get("fac_count") else DASH),
         ]
+        if pdb.get("info_prefixes4"):
+            right.append((gray("Máx. Pref. v4"), cyan(str(pdb["info_prefixes4"]))))
+        if pdb.get("info_prefixes6"):
+            right.append((gray("Máx. Pref. v6"), cyan(str(pdb["info_prefixes6"]))))
         if pdb.get("irr_as_set"):
             right.append((gray("IRR AS-Set"),    magenta(pdb["irr_as_set"])))
         if pdb.get("looking_glass"):
@@ -355,6 +369,74 @@ def show_prefixes(asn):
     if not v4 and not v6:
         print(gray("  Nenhum prefixo encontrado."))
     print()
+
+
+def show_rpki_irr(asn):
+    section("RPKI  /  IRR Consistency", "⚑", C.RED)
+    data = ripe_routing_consistency(asn); time.sleep(REQ_DELAY)
+    if not data or not data.get("data"):
+        print(gray("  Sem dados de RPKI/IRR disponíveis.")); print(); return
+
+    pfxs = data["data"].get("prefixes", [])
+    if not pfxs:
+        print(gray("  Nenhum prefixo encontrado.")); print(); return
+
+    v4 = sorted([p for p in pfxs if ":" not in p.get("prefix","")], key=lambda x: x["prefix"])
+    v6 = sorted([p for p in pfxs if ":" in  p.get("prefix","")],    key=lambda x: x["prefix"])
+
+    def rpki_badge(st):
+        if   st == "valid":   return bold(green("✔ VALID"))
+        elif st == "invalid": return bold(red("✘ INVALID"))
+        else:                 return yellow("? NOT FOUND")
+
+    for label, plist in [("IPv4", v4), ("IPv6", v6)]:
+        if not plist: continue
+        total   = len(plist)
+        valid   = sum(1 for p in plist if p.get("rpki_status") == "valid")
+        invalid = sum(1 for p in plist if p.get("rpki_status") == "invalid")
+        nfound  = total - valid - invalid
+        no_irr  = sum(1 for p in plist if not p.get("in_whois"))
+        not_bgp = sum(1 for p in plist if not p.get("in_bgp"))
+        cov     = int(valid / total * 100) if total else 0
+
+        if cov == 100:   cov_str = bold(green(f"{cov}%"))
+        elif cov >= 50:  cov_str = bold(yellow(f"{cov}%"))
+        else:            cov_str = bold(red(f"{cov}%"))
+
+        print(f"\n  {C.BOLD}{C.RED}  {label}{C.RST}  {gray(f'— {total} prefixo(s)')}")
+        line = f"    {gray('RPKI  :')}  {green(f'✔ {valid} válidos')}"
+        if invalid: line += f"  {red(f'✘ {invalid} inválidos  ← ATENÇÃO')}"
+        if nfound:  line += f"  {yellow(f'? {nfound} sem ROA')}"
+        else:       line += f"  {green('✔ todos com ROA')}"
+        line += f"    {gray('Cobertura:')} {cov_str}"
+        print(line)
+        if no_irr:
+            print(f"    {gray('IRR   :')}  {yellow(f'⚠  {no_irr} prefixo(s) sem route object no IRR / WHOIS')}")
+        if not_bgp:
+            print(f"    {gray('BGP   :')}  {gray(f'○  {not_bgp} registrado(s) no IRR mas não anunciado no BGP')}")
+        print()
+
+        rows = []
+        for p in plist:
+            st    = p.get("rpki_status", "not_found")
+            irr   = ", ".join(p.get("irr_sources", [])) or DASH
+            b_bgp = green("✔") if p.get("in_bgp")   else red("✘")
+            b_irr = green("✔") if p.get("in_whois") else red("✘")
+            rows.append([cyan(p["prefix"]), rpki_badge(st), white(irr[:28]), b_bgp, b_irr])
+
+        print(vtable(rows, headers=[
+            gray("Prefixo"), gray("RPKI Status"), gray("IRR / Fonte"), gray("BGP"), gray("IRR")
+        ], color=C.RED, hcolor=C.RED))
+        print()
+
+
+def show_abuse(asn):
+    data = ripe_abuse_contact(asn); time.sleep(REQ_DELAY)
+    if not data: return
+    contacts = data.get("data", {}).get("anti_abuse_contacts", {})
+    emails    = contacts.get("emails", [])
+    if not emails: return
+    print(f"  {gray('Abuse Contact:')}  {cyan('  |  '.join(emails))}\n")
 
 
 def show_neighbours(asn):
@@ -670,7 +752,9 @@ def run(asn_or_name):
     show_header(asn, pdb, ripe_ov)
     show_policy(pdb)
     show_contacts(pdb)
+    show_abuse(asn)
     show_prefixes(asn)
+    show_rpki_irr(asn)
     show_neighbours(asn)
     show_ixs(pdb, net_id)
     show_facilities(pdb, net_id)

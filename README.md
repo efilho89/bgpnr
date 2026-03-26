@@ -94,10 +94,12 @@ bgpnr as13335
 
 | Seção                        | Fonte        | Descrição                                                  |
 |------------------------------|--------------|------------------------------------------------------------|
-| Cabeçalho                    | RIPE + PDB   | ASN, nome, país, RIR, website, tipo, escopo, tráfego, ratio, IPv6, multicast, total de IXs e facilities, IRR AS-Set, Looking Glass |
+| Cabeçalho                    | RIPE + PDB   | ASN, nome, país, RIR, data de alocação, status de anúncio, website, tipo, escopo, tráfego, ratio, IPv6, multicast, total de IXs e facilities, max prefixos IPv4/v6, IRR AS-Set, Looking Glass |
 | Política de Peering          | PeeringDB    | Política geral (Open/Selective/Restrictive/No), URL, restrição local, ratio, contratos, "nunca via Route Server" |
 | Contatos                     | PeeringDB    | Papéis NOC / Policy / Tech com nome, e-mail e telefone     |
+| Abuse Contact                | RIPE Stat    | E-mail(s) para reporte de abuso                            |
 | Prefixos Anunciados          | RIPE Stat    | Todos os prefixos IPv4 e IPv6 em grid visual               |
+| RPKI / IRR Consistency       | RIPE Stat    | Status RPKI por prefixo (Valid/Invalid/Not Found), cobertura ROA, consistência IRR/WHOIS vs BGP |
 | Upstream Providers           | RIPE Stat    | ASNs que fornecem trânsito (relação left)                  |
 | Downstream Customers         | RIPE Stat    | ASNs que recebem trânsito (relação right)                  |
 | Peers                        | RIPE Stat    | Vizinhos sem relação definida (relação uncertain), até 50  |
@@ -262,6 +264,44 @@ Quando a chave está ativa, o bgpnr exibe `PeeringDB: API Key ativa` no rodapé 
 
 ## Exemplos de Saída
 
+### RPKI e IRR Consistency
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ⚑  RPKI  /  IRR Consistency                                                │
+└────────────────────────────────────────────────────────────────────────────┘
+
+  IPv4  — 15 prefixo(s)
+    RPKI  :  ✔ 14 válidos  ? 1 sem ROA    Cobertura: 93%
+    IRR   :  ⚠  1 prefixo(s) sem route object no IRR / WHOIS
+
+┌─────────────────────┬─────────────┬──────────────────────┬─────┬─────┐
+│ Prefixo             │ RPKI Status │ IRR / Fonte          │ BGP │ IRR │
+├─────────────────────┼─────────────┼──────────────────────┼─────┼─────┤
+│ 1.1.1.0/24          │ ✔ VALID     │ APNIC-NONAUTH        │  ✔  │  ✔  │
+│ 104.16.0.0/12       │ ✔ VALID     │ ARIN                 │  ✔  │  ✔  │
+│ 192.0.2.0/24        │ ✘ INVALID   │ —                    │  ✔  │  ✘  │
+│ 198.51.100.0/24     │ ? NOT FOUND │ RIPE                 │  ✔  │  ✔  │
+└─────────────────────┴─────────────┴──────────────────────┴─────┴─────┘
+```
+
+**Interpretação dos status RPKI:**
+
+| Status       | Significado                                                              |
+|--------------|--------------------------------------------------------------------------|
+| `✔ VALID`    | ROA existe, origin AS correto, prefixo dentro do max-length              |
+| `✘ INVALID`  | ROA existe mas origin AS errado ou prefixo mais específico que max-length — pode indicar hijack ou erro de configuração |
+| `? NOT FOUND`| Nenhum ROA cobre este prefixo — sem proteção RPKI                        |
+
+**Interpretação das colunas BGP / IRR:**
+
+| Col | `✔`                              | `✘`                                             |
+|-----|----------------------------------|-------------------------------------------------|
+| BGP | Prefixo visto no BGP global      | Registrado no IRR mas não anunciado (rota ghost)|
+| IRR | Route object existe no IRR/WHOIS | Anunciado no BGP sem route object (sem filtro)  |
+
+---
+
 ### Cabeçalho de um ASN
 
 ```
@@ -362,30 +402,49 @@ bgpnr --transit 1916
 
 ## Glossário
 
-| Termo           | Descrição                                                                          |
-|-----------------|------------------------------------------------------------------------------------|
-| **ASN**         | Autonomous System Number — identificador único de uma rede na internet             |
-| **IX / IXP**    | Internet Exchange Point — ponto de troca de tráfego onde redes se interconectam   |
-| **RS**          | Route Server — servidor de rotas do IX que facilita o peering multilateral         |
-| **BFD**         | Bidirectional Forwarding Detection — protocolo de detecção rápida de falhas        |
-| **IRR AS-Set**  | Conjunto de ASes registrado em um Internet Routing Registry para filtragem         |
-| **Looking Glass** | Ferramenta pública para visualizar rotas BGP a partir dos roteadores do AS       |
-| **Upstream**    | Provedor de trânsito IP — de quem o AS recebe conectividade para a internet        |
-| **Downstream**  | Cliente de trânsito — AS que recebe conectividade através do AS consultado         |
-| **Peering**     | Acordo de troca de tráfego direta entre dois ASes, geralmente sem custo            |
-| **Settlement-free** | Peering sem custo financeiro, típico em IXs                                   |
-| **Facility**    | Data center onde o AS possui equipamento físico (colocation)                       |
-| **RIR**         | Regional Internet Registry (ARIN, RIPE, LACNIC, APNIC, AFRINIC)                   |
-| **Prefix**      | Bloco de endereços IP anunciado via BGP (ex: 1.1.1.0/24)                          |
+| Termo               | Descrição                                                                      |
+|---------------------|--------------------------------------------------------------------------------|
+| **ASN**             | Autonomous System Number — identificador único de uma rede na internet         |
+| **IX / IXP**        | Internet Exchange Point — ponto de troca de tráfego onde redes se interconectam |
+| **RS**              | Route Server — servidor de rotas do IX que facilita o peering multilateral     |
+| **BFD**             | Bidirectional Forwarding Detection — protocolo de detecção rápida de falhas    |
+| **RPKI**            | Resource Public Key Infrastructure — sistema de validação criptográfica de rotas BGP via ROAs |
+| **ROA**             | Route Origin Authorization — registro que declara qual AS pode anunciar um prefixo e o max-length permitido |
+| **RPKI Valid**      | Prefixo coberto por ROA com origin AS e max-length corretos                    |
+| **RPKI Invalid**    | ROA existe mas origin AS está errado ou prefixo mais específico que max-length — risco de hijack |
+| **RPKI Not Found**  | Nenhum ROA cobre o prefixo — sem proteção RPKI                                 |
+| **IRR**             | Internet Routing Registry — banco de dados de route objects e AS-Sets usados para filtragem |
+| **Route Object**    | Registro no IRR que documenta um prefixo e seu AS de origem                    |
+| **IRR AS-Set**      | Conjunto de ASes registrado em um IRR para filtragem de prefixos               |
+| **Looking Glass**   | Ferramenta pública para visualizar rotas BGP a partir dos roteadores do AS     |
+| **Upstream**        | Provedor de trânsito IP — de quem o AS recebe conectividade para a internet    |
+| **Downstream**      | Cliente de trânsito — AS que recebe conectividade através do AS consultado     |
+| **Peering**         | Acordo de troca de tráfego direta entre dois ASes, geralmente sem custo        |
+| **Settlement-free** | Peering sem custo financeiro, típico em IXs                                    |
+| **Facility**        | Data center onde o AS possui equipamento físico (colocation)                   |
+| **RIR**             | Regional Internet Registry (ARIN, RIPE, LACNIC, APNIC, AFRINIC)               |
+| **Prefix**          | Bloco de endereços IP anunciado via BGP (ex: 1.1.1.0/24)                      |
+| **Max-length**      | Comprimento máximo de prefixo permitido em um ROA (ex: /24 não permite /25)   |
+| **Abuse Contact**   | E-mail para reporte de atividades abusivas originadas do AS                    |
 
 ---
 
 ## Fontes de Dados
 
-| API        | Endpoint base                        | Dados fornecidos                                     |
-|------------|--------------------------------------|------------------------------------------------------|
-| RIPE Stat  | `stat.ripe.net/data`                 | Visão geral do AS, prefixos anunciados, vizinhos BGP |
-| PeeringDB  | `www.peeringdb.com/api`              | IXs, facilities, política, contatos, IRR, LG         |
+| API        | Endpoint base                        | Dados fornecidos                                                   |
+|------------|--------------------------------------|--------------------------------------------------------------------|
+| RIPE Stat  | `stat.ripe.net/data`                 | Visão geral, prefixos anunciados, vizinhos BGP, RPKI/IRR consistency, abuse contact |
+| PeeringDB  | `www.peeringdb.com/api`              | IXs, facilities, política de peering, contatos, IRR AS-Set, LG    |
+
+**Endpoints RIPE Stat utilizados:**
+
+| Endpoint                   | Uso                                              |
+|----------------------------|--------------------------------------------------|
+| `as-overview`              | Nome, holder, alocação, status de anúncio        |
+| `announced-prefixes`       | Lista de prefixos IPv4/v6 anunciados             |
+| `asn-neighbours`           | Upstreams, downstreams e peers BGP               |
+| `as-routing-consistency`   | RPKI status + consistência IRR vs BGP            |
+| `abuse-contact-finder`     | E-mail de abuse do AS                            |
 
 O bgpnr não depende da BGPView API (que foi descontinuada) — usa exclusivamente RIPE Stat e PeeringDB.
 
@@ -406,6 +465,12 @@ O bgpnr não depende da BGPView API (que foi descontinuada) — usa exclusivamen
 | IRR AS-Set                       | ✘     | ✔     |
 | Looking Glass                    | ✘     | ✔     |
 | Contatos NOC / Policy / Tech     | ✘     | ✔     |
+| Abuse Contact                    | ✘     | ✔     |
+| **RPKI por prefixo (Valid/Invalid/Not Found)** | ✘ | ✔ |
+| **IRR Consistency (BGP vs route objects)**     | ✘ | ✔ |
+| **Cobertura ROA com percentual**               | ✘ | ✔ |
+| **Data de alocação do ASN**                    | ✘ | ✔ |
+| **Max prefixos IPv4/IPv6**                     | ✘ | ✔ |
 | Facilities / Colocation          | ✘     | ✔     |
 | Tipo / escopo / tráfego da rede  | ✘     | ✔     |
 | Autenticação PeeringDB (API Key) | ✘     | ✔     |
