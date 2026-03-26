@@ -1,62 +1,29 @@
-# bgpnr — BGP Network Recon
+<div align="center">
 
-Ferramenta de linha de comando para consulta detalhada de informações de ASN (Autonomous System Number), combinando dados do **PeeringDB** e da **BGPView API**.
+```
+   ██████╗  ██████╗ ██████╗ ███╗  ██╗██████╗
+   ██╔══██╗██╔════╝ ██╔══██╗████╗ ██║██╔══██╗
+   ██████╦╝██║  ███╗██████╔╝██╔██╗██║██████╔╝
+   ██╔══██╗██║   ██║██╔═══╝ ██║╚████║██╔══██╗
+   ██████╔╝╚██████╔╝██║     ██║ ╚███║██║  ██║
+   ╚═════╝  ╚═════╝ ╚═╝     ╚═╝  ╚══╝╚═╝  ╚═╝
+```
 
-Inspirado no [bgprr](https://github.com/remontti/bgprr), porém com mais recursos: política de peering, facilities, contatos, RS peer, BFD e muito mais.
+**BGP Network Recon** — ferramenta de linha de comando para consulta detalhada de ASNs
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+![Python](https://img.shields.io/badge/Python-3.6%2B-blue)
+![Platform](https://img.shields.io/badge/Platform-Linux-lightgrey)
+
+</div>
 
 ---
 
-## Demonstração
+## O que é o bgpnr?
 
-```
-  bgpnr ─ BGP Network Recon
+O **bgpnr** (BGP Network Recon) é uma ferramenta CLI que combina dados do **RIPE Stat** e do **PeeringDB** para entregar uma visão completa de qualquer ASN diretamente no terminal — prefixos, upstreams, downstreams, Internet Exchanges, facilities, política de peering, contatos e muito mais.
 
-  ASN               AS13335
-  Nome              Cloudflare, Inc.
-  País              US
-  RIR               ARIN
-  Alocado em        14/09/2010
-  Website           https://www.cloudflare.com
-  Tipo              Content
-  Escopo            Global
-  IPv6              Sim
-  IXs               78
-  Facilities        36
-  IRR AS-Set        RIPE::AS-CLOUDFLARE
-
-──────────────────────────────────────────────────────────────────────
-  Política de Peering (PeeringDB)
-──────────────────────────────────────────────────────────────────────
-  Política geral      Open
-  URL da política     https://www.cloudflare.com/peering-policy
-  Nunca via RS        Não
-
-──────────────────────────────────────────────────────────────────────
-  Internet Exchanges (PeeringDB)
-──────────────────────────────────────────────────────────────────────
-  Internet Exchange      Velocidade  IPv4              IPv6                RS   BFD
-  ---------------------  ----------  ----------------  ------------------  ---  ---
-  ● AMS-IX               10 Gbps     80.249.211.130    2001:7f8:1::a502:…  RS   BFD
-  ● DE-CIX Frankfurt     10 Gbps     80.81.194.23      2001:7f8::3417:0:1  RS   —
-  ● IX.br São Paulo      10 Gbps     187.16.216.185    2001:12f8::185      RS   BFD
-```
-
----
-
-## Funcionalidades
-
-| Seção                          | Fonte         |
-|-------------------------------|---------------|
-| Info básica (ASN, País, RIR)  | BGPView       |
-| Tipo, escopo, tráfego, ratio  | PeeringDB     |
-| IRR AS-Set, Looking Glass     | PeeringDB     |
-| Política de Peering           | PeeringDB     |
-| Contatos (NOC / Policy / Tech)| PeeringDB     |
-| Prefixos IPv4 / IPv6          | BGPView       |
-| Upstream Providers            | BGPView       |
-| Downstream Customers          | BGPView       |
-| Internet Exchanges (RS / BFD) | PeeringDB     |
-| Facilities / Colocation       | PeeringDB     |
+Inspirado no [bgprr](https://github.com/remontti/bgprr), mas com escopo maior: comparação de IXs entre ASNs, análise de oportunidades de peering, suporte a API Key, layout visual com box-drawing e ASCII art.
 
 ---
 
@@ -69,17 +36,13 @@ Inspirado no [bgprr](https://github.com/remontti/bgprr), porém com mais recurso
 sudo apt install python3-requests
 ```
 
-**Opcional** — tabelas mais formatadas:
-
-```bash
-sudo apt install python3-tabulate
-```
+Sem outras dependências obrigatórias. Funciona em qualquer distribuição Linux moderna.
 
 ---
 
 ## Instalação
 
-### Via wget (instalação rápida)
+### Instalação rápida (wget)
 
 ```bash
 sudo wget https://raw.githubusercontent.com/efilho89/bgpnr/main/bgpnr -O /usr/local/bin/bgpnr
@@ -98,168 +61,381 @@ sudo chmod +x /usr/local/bin/bgpnr
 ### Verificar instalação
 
 ```bash
-bgpnr 15169
+bgpnr 13335
 ```
 
 ---
 
 ## Uso
 
-### Por ASN (direto)
-
-```bash
-bgpnr 13335        # Cloudflare
-bgpnr 15169        # Google
-bgpnr AS1916       # Rede Nacional de Ensino e Pesquisa (RNP)
-bgpnr 6939         # Hurricane Electric
+```
+bgpnr <ASN|nome>                  Consulta um ASN ou busca por nome
+bgpnr --compare <ASN1> <ASN2>     IXs em comum entre dois ASNs
+bgpnr --transit <ASN>             Trânsito IP vs oportunidades de peering
+bgpnr --help                      Exibe ajuda
+bgpnr                             Modo interativo
 ```
 
-### Por nome de organização
+---
 
-Quando o argumento não é um número, o bgpnr busca por nome e exibe uma lista para seleção:
+## Referência de Comandos
+
+### 1. Consulta de ASN
+
+Pesquisa completa por número de ASN. Aceita qualquer um dos formatos abaixo:
+
+```bash
+bgpnr 13335
+bgpnr AS13335
+bgpnr as13335
+```
+
+**O que é exibido:**
+
+| Seção                        | Fonte        | Descrição                                                  |
+|------------------------------|--------------|------------------------------------------------------------|
+| Cabeçalho                    | RIPE + PDB   | ASN, nome, país, RIR, website, tipo, escopo, tráfego, ratio, IPv6, multicast, total de IXs e facilities, IRR AS-Set, Looking Glass |
+| Política de Peering          | PeeringDB    | Política geral (Open/Selective/Restrictive/No), URL, restrição local, ratio, contratos, "nunca via Route Server" |
+| Contatos                     | PeeringDB    | Papéis NOC / Policy / Tech com nome, e-mail e telefone     |
+| Prefixos Anunciados          | RIPE Stat    | Todos os prefixos IPv4 e IPv6 em grid visual               |
+| Upstream Providers           | RIPE Stat    | ASNs que fornecem trânsito (relação left)                  |
+| Downstream Customers         | RIPE Stat    | ASNs que recebem trânsito (relação right)                  |
+| Peers                        | RIPE Stat    | Vizinhos sem relação definida (relação uncertain), até 50  |
+| Internet Exchanges           | PeeringDB    | Nome do IX, velocidade, IPs IPv4/IPv6, RS peer, BFD        |
+| Facilities / Colocation      | PeeringDB    | Data centers onde o AS está presente                       |
+
+**Exemplos:**
+
+```bash
+bgpnr 15169        # Google
+bgpnr 13335        # Cloudflare
+bgpnr 1916         # RNP — Rede Nacional de Ensino e Pesquisa
+bgpnr 6939         # Hurricane Electric
+bgpnr AS262979     # Aceita prefixo "AS"
+```
+
+---
+
+### 2. Busca por Nome
+
+Quando o argumento não é um número, o bgpnr busca por nome no PeeringDB e apresenta uma lista numerada para seleção:
 
 ```bash
 bgpnr Cloudflare
 bgpnr Embratel
 bgpnr "NTT Communications"
 bgpnr ANSP
+bgpnr Locaweb
 ```
 
-### Modo interativo
+**Fluxo:**
 
-Sem argumentos, entra no modo interativo:
+```
+  Buscando Cloudflare ...
+
+┌──┬──────────┬──────────────────────┬──────────────────────────┐
+│ #│ ASN      │ Nome                 │ Descrição                │
+├──┼──────────┼──────────────────────┼──────────────────────────┤
+│ 1│ AS13335  │ Cloudflare, Inc.     │ CLOUDFLARENET            │
+│ 2│ AS209242 │ Cloudflare WARP      │                          │
+└──┴──────────┴──────────────────────┴──────────────────────────┘
+
+  Selecione (Enter cancela): 1
+```
+
+Após selecionar, exibe a consulta completa do ASN escolhido.
+
+---
+
+### 3. Modo Interativo
+
+Sem argumentos, entra no modo interativo com menu de ajuda:
 
 ```bash
 bgpnr
 ```
 
 ```
-  bgpnr ─ BGP Network Recon
-  Consulta ASN via PeeringDB + BGPView
-
-  ASN  →  ex: 1916, 15169, AS6939
-  Nome →  ex: Cloudflare, ANSP, Embratel, NTT
-  Ctrl+C para sair
+  ┌──────────────────────────────────────────────────────────────┐
+  │ bgpnr 13335               →  consulta ASN                   │
+  │ bgpnr Cloudflare          →  busca por nome                 │
+  │ bgpnr --compare 1234 5678 →  IXs em comum entre dois ASNs  │
+  │ bgpnr --transit 1234      →  trânsito IP vs IXs (peering)  │
+  └──────────────────────────────────────────────────────────────┘
 
   ASN / Organização: _
 ```
 
+Use `Ctrl+C` para sair a qualquer momento.
+
 ---
 
-## API Key do PeeringDB (opcional)
+### 4. Comparar IXs entre Dois ASNs (`--compare`)
 
-O acesso ao PeeringDB é público por padrão. Para obter rate limit mais alto e acesso a dados restritos, configure uma API Key:
+Descobre quais Internet Exchanges dois ASNs têm em comum — útil para avaliar peering bilateral direto.
 
-1. Crie uma conta em [peeringdb.com](https://www.peeringdb.com)
+```bash
+bgpnr --compare <ASN1> <ASN2>
+bgpnr -c <ASN1> <ASN2>
+bgpnr compare <ASN1> <ASN2>
+```
+
+**Exemplos:**
+
+```bash
+bgpnr --compare 13335 15169      # Cloudflare vs Google
+bgpnr --compare 1916 28598       # RNP vs Claro Brasil
+bgpnr -c AS6939 AS174            # Hurricane Electric vs Cogent
+```
+
+**O que é exibido:**
+
+1. **Resumo**: total de IXs de cada ASN e quantos têm em comum
+2. **IXs em Comum**: tabela com nome do IX, velocidade de cada ASN, endereços IPv4/IPv6 de cada ASN e status de RS peer
+3. **IXs Exclusivos**: IXs que cada ASN possui e o outro não
+
+**Caso de uso típico:** verificar se dois peers potenciais já estão presentes no mesmo IX antes de abrir negociação de peering.
+
+---
+
+### 5. Trânsito IP vs IXs — Oportunidades de Peering (`--transit`)
+
+Para um dado ASN, lista todos os seus **upstreams de trânsito** (via RIPE Stat) e verifica em quais deles o AS já existe no mesmo IX — identificando oportunidades de substituir trânsito pago por peering gratuito via IX.
+
+```bash
+bgpnr --transit <ASN>
+bgpnr -t <ASN>
+bgpnr transit <ASN>
+```
+
+**Exemplos:**
+
+```bash
+bgpnr --transit 1916       # RNP
+bgpnr --transit 28598      # Claro Brasil
+bgpnr -t 262979
+```
+
+**O que é exibido:**
+
+1. **Resumo**: ASN consultado, total de IXs e total de upstreams a verificar
+2. **Oportunidades de Peering Direto**: upstreams que compartilham pelo menos um IX — com detalhes do IX, velocidade dos dois lados, IPs e RS
+3. **Upstreams sem IX em Comum**: upstreams verificados mas sem IX compartilhado (com motivo)
+4. **Não encontrados no PeeringDB**: upstreams sem presença no PeeringDB
+
+**Caso de uso típico:** operador de rede quer reduzir custo de trânsito. Roda `--transit` no próprio ASN e vê quais upstreams já estão no mesmo IX — candidatos imediatos a peering settlement-free.
+
+> **Nota:** este modo faz diversas chamadas à API (um request por upstream). Para ASNs com muitos upstreams, pode levar alguns segundos.
+
+---
+
+## API Key do PeeringDB (opcional, recomendado)
+
+Por padrão o bgpnr acessa o PeeringDB sem autenticação (acesso público). Com uma API Key você obtém:
+
+- Rate limit muito maior (evita erros `429 Too Many Requests`)
+- Acesso a dados marcados como privados ou restritos a membros
+
+### Como configurar
+
+1. Crie uma conta gratuita em [peeringdb.com](https://www.peeringdb.com)
 2. Acesse **Profile → API Keys → Add**
-3. Exporte a chave antes de usar o bgpnr:
+3. Gere uma chave com permissão de leitura
+
+### Uso temporário (sessão atual)
 
 ```bash
 export PEERINGDB_API_KEY=sua_chave_aqui
 bgpnr 13335
 ```
 
-Para tornar permanente, adicione ao `~/.bashrc`:
+### Uso permanente
 
 ```bash
 echo 'export PEERINGDB_API_KEY=sua_chave_aqui' >> ~/.bashrc
 source ~/.bashrc
 ```
 
----
-
-## Exemplos de saída
-
-### Upstreams e Downstreams
-
-```
-──────────────────────────────────────────────────────────────────────
-  Upstream Providers (BGPView)
-──────────────────────────────────────────────────────────────────────
-  ASN      Nome                    Descrição          IPv4  IPv6
-  -------  ----------------------  -----------------  ----  ----
-  AS174    Cogent Communications   COGENT-174          ✔     ✔
-  AS3356   Lumen Technologies      LEVEL3              ✔     ✔
-  AS6461   Zayo Bandwidth          MFNX                ✔     ✘
-```
-
-### Prefixos
-
-```
-──────────────────────────────────────────────────────────────────────
-  Prefixos Anunciados (BGPView)
-──────────────────────────────────────────────────────────────────────
-
-  IPv4 — 15 prefixo(s)
-  Prefixo          Descrição                            RIR
-  ---------------  -----------------------------------  ----
-  1.1.1.0/24       APNIC and Cloudflare DNS Resolver    APNIC
-  104.16.0.0/12    CLOUDFLARENET                        ARIN
-
-  IPv6 — 6 prefixo(s)
-  Prefixo              Descrição        RIR
-  -------------------  ---------------  ----
-  2606:4700::/32       CLOUDFLARENET    ARIN
-```
-
-### Facilities
-
-```
-──────────────────────────────────────────────────────────────────────
-  Facilities / Colocation (PeeringDB)
-──────────────────────────────────────────────────────────────────────
-  Facility                              Localização
-  ------------------------------------  -----------------------
-  Equinix AM7 (Science Park)            Amsterdam, NL
-  Equinix DA1                           Dallas, US
-  Equinix SP2 (antiga ISACO / Tivit)    São Paulo, BR
-
-  Total: 36 facility(ies)
-```
+Quando a chave está ativa, o bgpnr exibe `PeeringDB: API Key ativa` no rodapé da saída.
 
 ---
 
-## Distribuições testadas
+## Exemplos de Saída
 
-| Distro             | Status |
-|--------------------|--------|
-| Debian 12/13       | ✔      |
-| Ubuntu 22.04/24.04 | ✔      |
-| Kali Linux         | ✔      |
-| Rocky Linux 9      | ✔      |
-| Arch Linux         | ✔      |
+### Cabeçalho de um ASN
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ◈  AS13335  —  Cloudflare, Inc.                                            │
+└────────────────────────────────────────────────────────────────────────────┘
+
+  ┌──────────────────────────────────┬──────────────────────────────────┐
+  │ ASN          AS13335             │ Tipo         Content             │
+  │ Nome         Cloudflare, Inc.    │ Escopo       Global              │
+  │ País         US                  │ Tráfego      100-1000Gbps        │
+  │ RIR          ARIN                │ IPv6          ✔ SIM              │
+  │ Website      https://cloudflare… │ IXs          78                  │
+  │                                  │ IRR AS-Set   RIPE::AS-CLOUDFLARE │
+  └──────────────────────────────────┴──────────────────────────────────┘
+```
+
+### Internet Exchanges
+
+```
+┌──────────────────────────┬───────────┬─────────────────┬──────────────────┬──────┬──────┐
+│ Internet Exchange        │ Velocidade│ IPv4            │ IPv6             │ RS   │ BFD  │
+├──────────────────────────┼───────────┼─────────────────┼──────────────────┼──────┼──────┤
+│ ● AMS-IX                 │  10 Gbps  │ 80.249.211.130  │ 2001:7f8:1::…   │  RS  │  BFD │
+│ ● DE-CIX Frankfurt       │  10 Gbps  │ 80.81.194.23    │ 2001:7f8::3417… │  RS  │  —   │
+│ ● IX.br São Paulo        │  10 Gbps  │ 187.16.216.185  │ 2001:12f8::185  │  RS  │  BFD │
+└──────────────────────────┴───────────┴─────────────────┴──────────────────┴──────┴──────┘
+
+  Total: 78 IX(s)
+```
+
+### Comparação de IXs
+
+```bash
+bgpnr --compare 13335 15169
+```
+
+```
+┌──────────┬──────────────────┬───────┬──────┐
+│ AS13335  │ Cloudflare, Inc. │ 78    │ IXs  │
+│ AS15169  │ Google LLC       │ 62    │ IXs  │
+│ Em comum │                  │ 41    │ IXs  │
+└──────────┴──────────────────┴───────┴──────┘
+
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ★  IXs em Comum  (41)  —  AS13335 ↔ AS15169                               │
+└────────────────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────┬──────────┬──────────┬──────────────┬──────────────┬──────┬──────┐
+│ Internet Exchange    │ Vel13335 │ Vel15169 │ IPv4 13335   │ IPv4 15169   │ RS…  │ RS…  │
+├──────────────────────┼──────────┼──────────┼──────────────┼──────────────┼──────┼──────┤
+│ AMS-IX               │ 10 Gbps  │ 100 Gbps │ 80.249.211…  │ 80.249.208…  │  RS  │  RS  │
+│ DE-CIX Frankfurt     │ 10 Gbps  │ 10 Gbps  │ 80.81.194.…  │ 80.81.192.…  │  RS  │  RS  │
+└──────────────────────┴──────────┴──────────┴──────────────┴──────────────┴──────┴──────┘
+```
+
+### Análise de Trânsito
+
+```bash
+bgpnr --transit 1916
+```
+
+```
+┌────────────────────────────────────────────────────────────────────────────┐
+│ ★  Oportunidades de Peering Direto  (3)                                    │
+└────────────────────────────────────────────────────────────────────────────┘
+
+  Estes upstreams estão no mesmo IX — candidatos a peering gratuito.
+
+  AS174   Cogent Communications  — 2 IX(s)
+  ┌────────────────┬──────────┬──────────┬─────────────┬─────────────┬──────┬──────┐
+  │ IX             │ Vel Meu  │ Vel AS174│ IPv4 Meu    │ IPv4 AS174  │ RS…  │ RS…  │
+  ├────────────────┼──────────┼──────────┼─────────────┼─────────────┼──────┼──────┤
+  │ IX.br São Paulo│ 10 Gbps  │ 100 Gbps │ 187.16.x.x  │ 187.16.y.y  │  RS  │  RS  │
+  └────────────────┴──────────┴──────────┴─────────────┴─────────────┴──────┴──────┘
+```
 
 ---
 
-## Fontes de dados
+## Referência Rápida de Badges e Símbolos
 
-| API       | URL                                                | Dados                                      |
-|-----------|----------------------------------------------------|--------------------------------------------|
-| BGPView   | [api.bgpview.io](https://api.bgpview.io)           | ASN info, prefixos, upstreams, downstreams |
-| PeeringDB | [peeringdb.com/api](https://www.peeringdb.com/api) | IXs, facilities, política, contatos        |
+| Símbolo / Badge          | Significado                                              |
+|--------------------------|----------------------------------------------------------|
+| `● verde`                | IX operacional                                           |
+| `● vermelho`             | IX não operacional                                       |
+| `RS`  (verde)            | Conectado ao Route Server do IX                          |
+| `—`   (cinza, no RS)     | Não conectado ao Route Server                            |
+| `BFD` (ciano)            | Suporta BFD (Bidirectional Forwarding Detection)         |
+| `—`   (cinza, no BFD)    | Sem suporte a BFD                                        |
+| `✔ SIM` (verde)          | Funcionalidade ativa (IPv6, multicast etc.)              |
+| `✘ NÃO` (vermelho)       | Funcionalidade inativa                                   |
+| `▲ Upstream`             | Provedor de trânsito (o ASN recebe trânsito destes)      |
+| `▼ Downstream`           | Cliente de trânsito (estes recebem trânsito do ASN)      |
+| `↔ Peers`                | Relação de peering não classificada                      |
+| `★ Oportunidade`         | Upstream que já está no mesmo IX (candidato a peering)   |
+
+---
+
+## Glossário
+
+| Termo           | Descrição                                                                          |
+|-----------------|------------------------------------------------------------------------------------|
+| **ASN**         | Autonomous System Number — identificador único de uma rede na internet             |
+| **IX / IXP**    | Internet Exchange Point — ponto de troca de tráfego onde redes se interconectam   |
+| **RS**          | Route Server — servidor de rotas do IX que facilita o peering multilateral         |
+| **BFD**         | Bidirectional Forwarding Detection — protocolo de detecção rápida de falhas        |
+| **IRR AS-Set**  | Conjunto de ASes registrado em um Internet Routing Registry para filtragem         |
+| **Looking Glass** | Ferramenta pública para visualizar rotas BGP a partir dos roteadores do AS       |
+| **Upstream**    | Provedor de trânsito IP — de quem o AS recebe conectividade para a internet        |
+| **Downstream**  | Cliente de trânsito — AS que recebe conectividade através do AS consultado         |
+| **Peering**     | Acordo de troca de tráfego direta entre dois ASes, geralmente sem custo            |
+| **Settlement-free** | Peering sem custo financeiro, típico em IXs                                   |
+| **Facility**    | Data center onde o AS possui equipamento físico (colocation)                       |
+| **RIR**         | Regional Internet Registry (ARIN, RIPE, LACNIC, APNIC, AFRINIC)                   |
+| **Prefix**      | Bloco de endereços IP anunciado via BGP (ex: 1.1.1.0/24)                          |
+
+---
+
+## Fontes de Dados
+
+| API        | Endpoint base                        | Dados fornecidos                                     |
+|------------|--------------------------------------|------------------------------------------------------|
+| RIPE Stat  | `stat.ripe.net/data`                 | Visão geral do AS, prefixos anunciados, vizinhos BGP |
+| PeeringDB  | `www.peeringdb.com/api`              | IXs, facilities, política, contatos, IRR, LG         |
+
+O bgpnr não depende da BGPView API (que foi descontinuada) — usa exclusivamente RIPE Stat e PeeringDB.
 
 ---
 
 ## Comparação com bgprr
 
-| Recurso                      | bgprr | bgpnr |
-|------------------------------|-------|-------|
-| Info básica de ASN           | ✔     | ✔     |
-| Prefixos IPv4/IPv6           | ✔     | ✔     |
-| Upstreams                    | ✔     | ✔     |
-| Downstreams                  | ✔     | ✔     |
-| Internet Exchanges           | ✔     | ✔     |
-| Route Server peer (RS)       | ✘     | ✔     |
-| BFD support                  | ✘     | ✔     |
-| Política de Peering          | ✘     | ✔     |
-| IRR AS-Set                   | ✘     | ✔     |
-| Looking Glass / Route Server | ✘     | ✔     |
-| Contatos NOC/Policy/Tech     | ✘     | ✔     |
-| Facilities / Colocation      | ✘     | ✔     |
-| Tipo/escopo/tráfego da rede  | ✘     | ✔     |
-| Autenticação PeeringDB       | ✘     | ✔     |
-| Busca por nome               | ✔     | ✔     |
-| Sem dependências externas    | ✘     | ✔     |
+| Recurso                          | bgprr | bgpnr |
+|----------------------------------|-------|-------|
+| Info básica de ASN               | ✔     | ✔     |
+| Prefixos IPv4/IPv6               | ✔     | ✔     |
+| Upstreams / Downstreams          | ✔     | ✔     |
+| Internet Exchanges               | ✔     | ✔     |
+| Busca por nome                   | ✔     | ✔     |
+| Route Server peer (RS)           | ✘     | ✔     |
+| BFD support                      | ✘     | ✔     |
+| Política de Peering              | ✘     | ✔     |
+| IRR AS-Set                       | ✘     | ✔     |
+| Looking Glass                    | ✘     | ✔     |
+| Contatos NOC / Policy / Tech     | ✘     | ✔     |
+| Facilities / Colocation          | ✘     | ✔     |
+| Tipo / escopo / tráfego da rede  | ✘     | ✔     |
+| Autenticação PeeringDB (API Key) | ✘     | ✔     |
+| Comparar IXs entre dois ASNs     | ✘     | ✔     |
+| Análise de oportunidade peering  | ✘     | ✔     |
+| Layout visual com box-drawing    | ✘     | ✔     |
+| ASCII art logo                   | ✘     | ✔     |
+| Sem BGPView (API offline)        | ✘     | ✔     |
+| Sem dependências externas extras | ✘     | ✔     |
+
+---
+
+## Distribuições Testadas
+
+| Distro              | Status |
+|---------------------|--------|
+| Debian 12 / 13      | ✔      |
+| Ubuntu 22.04 / 24.04| ✔      |
+| Kali Linux          | ✔      |
+| Rocky Linux 9       | ✔      |
+| Arch Linux          | ✔      |
+
+---
+
+## Atualização
+
+```bash
+sudo wget https://raw.githubusercontent.com/efilho89/bgpnr/main/bgpnr -O /usr/local/bin/bgpnr
+sudo chmod +x /usr/local/bin/bgpnr
+```
 
 ---
 
@@ -272,4 +448,4 @@ MIT License — veja [LICENSE](LICENSE)
 ## Créditos
 
 - Inspirado no [bgprr](https://github.com/remontti/bgprr) de [@remontti](https://github.com/remontti)
-- Dados fornecidos por [BGPView](https://bgpview.io) e [PeeringDB](https://www.peeringdb.com)
+- Dados fornecidos por [RIPE Stat](https://stat.ripe.net) e [PeeringDB](https://www.peeringdb.com)
