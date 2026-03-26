@@ -10,7 +10,7 @@ RIPE_API      = "https://stat.ripe.net/data"
 PEERINGDB_API = "https://www.peeringdb.com/api"
 PEERINGDB_KEY = os.environ.get("PEERINGDB_API_KEY", "")
 UA            = "bgpnr/5.3 (github.com/efilho89/bgpnr)"
-MAX_RETRIES   = 2
+MAX_RETRIES   = 1
 RETRY_DELAY   = 1
 REQ_DELAY     = 0.1
 
@@ -139,7 +139,7 @@ def get(url, params=None, retries=MAX_RETRIES):
         headers["Authorization"] = f"Api-Key {PEERINGDB_KEY}"
     for attempt in range(retries):
         try:
-            r = requests.get(url, params=params, headers=headers, timeout=8)
+            r = requests.get(url, params=params, headers=headers, timeout=12)
             if r.status_code == 429:
                 w = RETRY_DELAY*(attempt+1)
                 print(yellow(f"  ⏳ Rate limit {w}s...")); time.sleep(w); continue
@@ -847,7 +847,8 @@ def run(asn_or_name):
     print(f"  Consultando {bold(cyan(f'AS{asn}'))} ...\n")
 
     # ── Busca todas as fontes em paralelo ─────────────────────────────────────
-    with ThreadPoolExecutor(max_workers=6) as ex:
+    ex = ThreadPoolExecutor(max_workers=6)
+    try:
         f_pdb   = ex.submit(pdb_net,                  asn)
         f_ov    = ex.submit(ripe_overview,             asn)
         f_pfx   = ex.submit(ripe_prefixes,             asn)
@@ -857,9 +858,14 @@ def run(asn_or_name):
         pdb        = f_pdb.result()
         ripe_ov    = f_ov.result()
         pfx_data   = f_pfx.result()
-        rpki_data  = f_rpki.result()
         abuse_data = f_abuse.result()
         nb_data    = f_nb.result()
+        try:
+            rpki_data = f_rpki.result(timeout=6)
+        except Exception:
+            rpki_data = None
+    finally:
+        ex.shutdown(wait=False)
 
     net_id = pdb.get("id") if pdb else None
 
