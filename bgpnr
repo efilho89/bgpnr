@@ -181,6 +181,13 @@ def ripe_routing_consistency(asn):
 def ripe_abuse_contact(asn):
     return get(f"{RIPE_API}/abuse-contact-finder/data.json", {"resource":f"AS{asn}"})
 
+def pdb_ix_bulk(ix_ids):
+    """Busca detalhes de múltiplos IXs em uma chamada via id__in."""
+    if not ix_ids: return {}
+    d = get(f"{PEERINGDB_API}/ix", {"id__in": ",".join(str(i) for i in ix_ids)})
+    if not d: return {}
+    return {ix["id"]: ix for ix in d.get("data", [])}
+
 def build_ix_map(ixlans):
     m = {}
     for e in ixlans:
@@ -342,7 +349,7 @@ def show_contacts(pdb):
     print()
 
 
-def show_prefixes(asn, _data=None):
+def show_prefixes(asn, _data=None, _rpki_data=None):
     section("Prefixos Anunciados", "⬡", C.MAG)
     data = _data if _data is not None else ripe_prefixes(asn)
     if not data or not data.get("data"):
@@ -352,20 +359,48 @@ def show_prefixes(asn, _data=None):
     v4 = sorted([p for p in pfxs if ":" not in p.get("prefix","")], key=lambda x: x["prefix"])
     v6 = sorted([p for p in pfxs if ":" in  p.get("prefix","")],    key=lambda x: x["prefix"])
 
-    for label, plist, col_w, ncols in [("IPv4", v4, 20, 3), ("IPv6", v6, 26, 2)]:
+    # Monta lookup RPKI { prefix: {status, irr} } a partir do routing-consistency
+    rpki_lk = {}
+    if _rpki_data and _rpki_data.get("data"):
+        for p in _rpki_data["data"].get("prefixes", []):
+            rpki_lk[p["prefix"]] = {
+                "status": p.get("rpki_status","not_found"),
+                "irr":    ", ".join(p.get("irr_sources",[])) or DASH,
+            }
+
+    def rpki_cell(prefix):
+        st = rpki_lk.get(prefix, {}).get("status","not_found")
+        if   st == "valid":   return bold(green("✔ VALID"))
+        elif st == "invalid": return bold(red("✘ INVALID"))
+        else:                 return yellow("? NOT FOUND")
+
+    for label, plist in [("IPv4", v4), ("IPv6", v6)]:
         if not plist: continue
-        print(f"\n  {C.BOLD}{C.MAG}  {label}  {C.RST}{gray(f'{len(plist)} prefixo(s)')}")
-        # tabela com bordas
-        rows_grid = [plist[i:i+ncols] for i in range(0, len(plist), ncols)]
-        widths = [col_w] * ncols
-        print(f"  {C.MAG}┌{'┬'.join('─'*(w+2) for w in widths)}┐{C.RST}")
-        for row in rows_grid:
-            cells = [cyan(p["prefix"]) + " " * max(0, col_w - len(p["prefix"])) for p in row]
-            while len(cells) < ncols:
-                cells.append(" " * col_w)
-            bar = f"{C.MAG}│{C.RST}"
-            print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
-        print(f"  {C.MAG}└{'┴'.join('─'*(w+2) for w in widths)}┘{C.RST}")
+        print(f"\n  {C.BOLD}{C.MAG}  {label}{C.RST}  {gray(f'{len(plist)} prefixo(s)')}")
+
+        if rpki_lk:
+            # Tabela com colunas RPKI e IRR inline
+            rows = []
+            for p in plist:
+                ri  = rpki_lk.get(p["prefix"], {})
+                irr = ri.get("irr", DASH)
+                rows.append([cyan(p["prefix"]), rpki_cell(p["prefix"]), gray(irr[:24])])
+            print(vtable(rows,
+                headers=[gray("Prefixo"), gray("RPKI"), gray("IRR / Fonte")],
+                color=C.MAG, hcolor=C.MAG))
+        else:
+            # Grid simples quando não há dados RPKI
+            ncols = 3 if label == "IPv4" else 2
+            col_w = 20 if label == "IPv4" else 26
+            rows_grid = [plist[i:i+ncols] for i in range(0, len(plist), ncols)]
+            widths = [col_w] * ncols
+            print(f"  {C.MAG}┌{'┬'.join('─'*(w+2) for w in widths)}┐{C.RST}")
+            for row in rows_grid:
+                cells = [cyan(p["prefix"]) + " " * max(0, col_w - len(p["prefix"])) for p in row]
+                while len(cells) < ncols: cells.append(" " * col_w)
+                bar = f"{C.MAG}│{C.RST}"
+                print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
+            print(f"  {C.MAG}└{'┴'.join('─'*(w+2) for w in widths)}┘{C.RST}")
 
     if not v4 and not v6:
         print(gray("  Nenhum prefixo encontrado."))
@@ -449,36 +484,61 @@ def show_neighbours(asn, _data=None):
     dns   = sorted([n for n in nb if n.get("type")=="right"],     key=lambda x: -x.get("power",0))
     peers = sorted([n for n in nb if n.get("type")=="uncertain"], key=lambda x:  x.get("asn",0))
 
-    def asn_grid(items, fn, ncols=5):
-        w = 14
+    DETAIL = 12  # top N com nome completo
+
+    def fetch_holder(asn_n):
+        d = get(f"{RIPE_API}/as-overview/data.json", {"resource": f"AS{asn_n}"})
+        return ((d or {}).get("data",{}) or {}).get("holder","") or ""
+
+    def compact_grid(items, color_fn, ncols=5):
+        w = 14; bar = f"{C.GRY}│{C.RST}"
         rows = [items[i:i+ncols] for i in range(0, len(items), ncols)]
-        bar = f"{C.GRY}│{C.RST}"
-        widths = [w] * ncols
-        print(f"  {C.GRY}┌{'┬'.join('─'*(w+2) for _ in widths)}┐{C.RST}")
+        print(f"  {C.GRY}┌{'┬'.join('─'*(w+2) for _ in range(ncols))}┐{C.RST}")
         for row in rows:
-            cells = [fn(n) + " " * max(0, w - vlen(fn(n))) for n in row]
-            while len(cells) < ncols: cells.append(" " * w)
+            cells = [color_fn(f"AS{n['asn']}") + " "*max(0, w-vlen(color_fn(f"AS{n['asn']}"))) for n in row]
+            while len(cells) < ncols: cells.append(" "*w)
             print(f"  {bar}" + bar.join(f" {c} " for c in cells) + bar)
-        print(f"  {C.GRY}└{'┴'.join('─'*(w+2) for _ in widths)}┘{C.RST}")
+        print(f"  {C.GRY}└{'┴'.join('─'*(w+2) for _ in range(ncols))}┘{C.RST}")
 
-    if ups:
-        section(f"Upstream Providers  ({len(ups)})", "▲", C.BLU)
+    def show_group(items, label, icon, col, asn_fn):
+        if not items: return
+        section(f"{label}  ({len(items)})", icon, col)
         print()
-        asn_grid(ups, lambda n: bold(blue(f"AS{n['asn']}")))
+        top  = items[:DETAIL]
+        rest = items[DETAIL:]
+
+        # Busca nomes em paralelo para o top N
+        sys.stdout.write(f"  {gray('Buscando nomes...')}\r")
+        sys.stdout.flush()
+        with ThreadPoolExecutor(max_workers=DETAIL) as ex:
+            futs = {n["asn"]: ex.submit(fetch_holder, n["asn"]) for n in top}
+            names = {a: f.result() for a, f in futs.items()}
+        sys.stdout.write(" " * 30 + "\r")
+
+        rows = []
+        for n in top:
+            nm = names.get(n["asn"],"") or f"AS{n['asn']}"
+            v4 = green("✔") if n.get("v4_peers",0) > 0 else red("✘")
+            v6 = green("✔") if n.get("v6_peers",0) > 0 else red("✘")
+            rows.append([asn_fn(f"AS{n['asn']}"), bold(white(nm[:50])), v4, v6])
+        print(vtable(rows,
+            headers=[gray("ASN"), gray("Nome / Holder"), gray("IPv4"), gray("IPv6")],
+            color=col, hcolor=col))
+
+        if rest:
+            print(f"\n  {gray(f'  +{len(rest)} adicionais:')}")
+            compact_grid(rest, lambda s: gray(s))
         print()
 
-    if dns:
-        section(f"Downstream Customers  ({len(dns)})", "▼", C.GRN)
-        print()
-        asn_grid(dns, lambda n: bold(green(f"AS{n['asn']}")))
-        print()
+    show_group(ups,  "Upstream Providers",   "▲", C.BLU, lambda s: bold(blue(s)))
+    show_group(dns,  "Downstream Customers", "▼", C.GRN, lambda s: bold(green(s)))
 
     if peers:
-        shown = peers[:50]
+        shown = peers[:60]
         section(f"Peers  ({len(peers)})", "↔", C.GRY)
         print()
-        asn_grid(shown, lambda n: gray(f"AS{n['asn']}"), ncols=6)
-        if len(peers) > 50: print(gray(f"\n  ... e mais {len(peers)-50} peers"))
+        compact_grid(shown, lambda s: gray(s), ncols=6)
+        if len(peers) > 60: print(gray(f"\n  ... e mais {len(peers)-60} peers"))
         print()
 
 
@@ -492,11 +552,20 @@ def show_ixs(pdb, net_id):
         print(gray("  Nenhum IX encontrado.")); return
 
     ix_map = build_ix_map(ixlans)
+
+    # Busca cidade/país dos IXs em bloco (uma chamada só)
+    ix_details = pdb_ix_bulk(list(ix_map.keys()))
+
     print()
     rows = []
-    for d in sorted(ix_map.values(), key=lambda x: x["name"]):
+    for ix_id, d in sorted(ix_map.items(), key=lambda x: x[1]["name"]):
+        det  = ix_details.get(ix_id, {})
+        city = det.get("city","") or ""
+        ctry = det.get("country","") or ""
+        loc  = f"{city}, {ctry}".strip(", ") or DASH
         rows.append([
-            f"{badge_op(d['op'])} {bold(d['name'][:40])}",
+            f"{badge_op(d['op'])} {bold(d['name'][:36])}",
+            gray(loc),
             fmt_speed(d["speed"]),
             fmt_ips(d["ipv4"]),
             fmt_ips(d["ipv6"]),
@@ -504,8 +573,8 @@ def show_ixs(pdb, net_id):
             badge_bfd(d["bfd"]),
         ])
     print(vtable(rows,
-        headers=[gray("Internet Exchange"), gray("Velocidade"),
-                 gray("IPv4"), gray("IPv6"), gray("RS"), gray("BFD")],
+        headers=[gray("Internet Exchange"), gray("Localização"),
+                 gray("Velocidade"), gray("IPv4"), gray("IPv6"), gray("RS"), gray("BFD")],
         color=C.CYN, hcolor=C.CYN))
     print(f"\n  {gray('Total:')} {bold(cyan(str(len(ix_map))))} IX(s)")
     print()
@@ -777,7 +846,7 @@ def run(asn_or_name):
     show_policy(pdb)
     show_contacts(pdb)
     show_abuse(asn,  _data=abuse_data)
-    show_prefixes(asn, _data=pfx_data)
+    show_prefixes(asn, _data=pfx_data, _rpki_data=rpki_data)
     show_rpki_irr(asn, _data=rpki_data)
     show_neighbours(asn, _data=nb_data)
     show_ixs(pdb, net_id)
