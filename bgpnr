@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# bgpnr v4.0 - BGP Network Recon  |  github.com/efilho89/bgpnr
+# bgpnr v5.1 - BGP Network Recon  |  github.com/efilho89/bgpnr
 
 import sys, os, time, re, requests
 from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor
 
 # ── Config ────────────────────────────────────────────────────────────────────
 RIPE_API      = "https://stat.ripe.net/data"
 PEERINGDB_API = "https://www.peeringdb.com/api"
 PEERINGDB_KEY = os.environ.get("PEERINGDB_API_KEY", "")
 UA            = "bgpnr/4.0 (github.com/efilho89/bgpnr)"
-MAX_RETRIES   = 4
+MAX_RETRIES   = 3
 RETRY_DELAY   = 2
-REQ_DELAY     = 0.4
+REQ_DELAY     = 0.1
 
 # ── Cores ─────────────────────────────────────────────────────────────────────
 class C:
@@ -142,15 +143,15 @@ def get(url, params=None, retries=MAX_RETRIES):
             if r.status_code == 429:
                 w = RETRY_DELAY*(attempt+1)
                 print(yellow(f"  ⏳ Rate limit {w}s...")); time.sleep(w); continue
-            if r.status_code == 404: return None
+            if r.status_code in (404, 500, 502, 503, 504): return None
             r.raise_for_status()
             return r.json()
         except requests.exceptions.ConnectionError:
             if attempt < retries-1: time.sleep(RETRY_DELAY)
         except requests.exceptions.Timeout:
             if attempt < retries-1: time.sleep(RETRY_DELAY)
-        except Exception as e:
-            print(red(f"  Erro: {e}")); break
+        except Exception:
+            break
     return None
 
 # ── APIs ──────────────────────────────────────────────────────────────────────
@@ -341,9 +342,9 @@ def show_contacts(pdb):
     print()
 
 
-def show_prefixes(asn):
+def show_prefixes(asn, _data=None):
     section("Prefixos Anunciados", "⬡", C.MAG)
-    data = ripe_prefixes(asn); time.sleep(REQ_DELAY)
+    data = _data if _data is not None else ripe_prefixes(asn)
     if not data or not data.get("data"):
         print(red("  Sem dados de prefixos.")); return
 
@@ -371,9 +372,9 @@ def show_prefixes(asn):
     print()
 
 
-def show_rpki_irr(asn):
+def show_rpki_irr(asn, _data=None):
     section("RPKI  /  IRR Consistency", "⚑", C.RED)
-    data = ripe_routing_consistency(asn); time.sleep(REQ_DELAY)
+    data = _data if _data is not None else ripe_routing_consistency(asn)
     if not data or not data.get("data"):
         print(gray("  Sem dados de RPKI/IRR disponíveis.")); print(); return
 
@@ -430,8 +431,8 @@ def show_rpki_irr(asn):
         print()
 
 
-def show_abuse(asn):
-    data = ripe_abuse_contact(asn); time.sleep(REQ_DELAY)
+def show_abuse(asn, _data=None):
+    data = _data if _data is not None else ripe_abuse_contact(asn)
     if not data: return
     contacts = data.get("data", {}).get("anti_abuse_contacts", {})
     emails    = contacts.get("emails", [])
@@ -439,8 +440,8 @@ def show_abuse(asn):
     print(f"  {gray('Abuse Contact:')}  {cyan('  |  '.join(emails))}\n")
 
 
-def show_neighbours(asn):
-    data = ripe_neighbours(asn); time.sleep(REQ_DELAY)
+def show_neighbours(asn, _data=None):
+    data = _data if _data is not None else ripe_neighbours(asn)
     if not data or not data.get("data"): return
 
     nb    = data["data"].get("neighbours",[])
@@ -524,9 +525,18 @@ def show_facilities(pdb, net_id):
     for f in sorted(facs, key=lambda x: x.get("name","") or ""):
         name = f.get("name","") or f"FAC-{f.get('fac_id','')}"
         loc  = ", ".join(filter(None,[f.get("city",""), f.get("country","")])) or DASH
-        rows.append([bold(white(name[:52])), gray(loc)])
+        # Tipos de conectividade disponíveis
+        conn_parts = []
+        if f.get("avail_ethernet"): conn_parts.append(green("Ethernet"))
+        if f.get("avail_sonet"):    conn_parts.append(cyan("SONET"))
+        if f.get("avail_atm"):      conn_parts.append(yellow("ATM"))
+        conn = "  ".join(conn_parts) if conn_parts else DASH
+        # ASN local no colo (pode ser diferente do ASN principal)
+        local_asn = f.get("local_asn")
+        asn_str = cyan(f"AS{local_asn}") if local_asn else DASH
+        rows.append([bold(white(name[:44])), gray(loc), conn, asn_str])
     print(vtable(rows,
-        headers=[gray("Facility"), gray("Localização")],
+        headers=[gray("Facility"), gray("Localização"), gray("Conectividade"), gray("ASN Local")],
         color=C.YLW, hcolor=C.YLW))
     print(f"\n  {gray('Total:')} {bold(cyan(str(len(facs))))} facility(ies)")
     print()
@@ -538,8 +548,9 @@ def compare_ixs(asn1, asn2):
     banner()
     print(f"  Comparando {bold(cyan(f'AS{asn1}'))} ↔ {bold(cyan(f'AS{asn2}'))} ...\n")
 
-    pdb1 = pdb_net(asn1); time.sleep(REQ_DELAY)
-    pdb2 = pdb_net(asn2); time.sleep(REQ_DELAY)
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        f1, f2 = ex.submit(pdb_net, asn1), ex.submit(pdb_net, asn2)
+        pdb1, pdb2 = f1.result(), f2.result()
     name1 = (pdb1.get("name","") if pdb1 else "") or f"AS{asn1}"
     name2 = (pdb2.get("name","") if pdb2 else "") or f"AS{asn2}"
 
@@ -745,17 +756,30 @@ def run(asn_or_name):
     banner()
     print(f"  Consultando {bold(cyan(f'AS{asn}'))} ...\n")
 
-    pdb     = pdb_net(asn);       time.sleep(REQ_DELAY)
-    ripe_ov = ripe_overview(asn); time.sleep(REQ_DELAY)
-    net_id  = pdb.get("id") if pdb else None
+    # ── Busca todas as fontes em paralelo ─────────────────────────────────────
+    with ThreadPoolExecutor(max_workers=6) as ex:
+        f_pdb   = ex.submit(pdb_net,                  asn)
+        f_ov    = ex.submit(ripe_overview,             asn)
+        f_pfx   = ex.submit(ripe_prefixes,             asn)
+        f_rpki  = ex.submit(ripe_routing_consistency,  asn)
+        f_abuse = ex.submit(ripe_abuse_contact,        asn)
+        f_nb    = ex.submit(ripe_neighbours,           asn)
+        pdb        = f_pdb.result()
+        ripe_ov    = f_ov.result()
+        pfx_data   = f_pfx.result()
+        rpki_data  = f_rpki.result()
+        abuse_data = f_abuse.result()
+        nb_data    = f_nb.result()
+
+    net_id = pdb.get("id") if pdb else None
 
     show_header(asn, pdb, ripe_ov)
     show_policy(pdb)
     show_contacts(pdb)
-    show_abuse(asn)
-    show_prefixes(asn)
-    show_rpki_irr(asn)
-    show_neighbours(asn)
+    show_abuse(asn,  _data=abuse_data)
+    show_prefixes(asn, _data=pfx_data)
+    show_rpki_irr(asn, _data=rpki_data)
+    show_neighbours(asn, _data=nb_data)
     show_ixs(pdb, net_id)
     show_facilities(pdb, net_id)
 
